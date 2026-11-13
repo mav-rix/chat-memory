@@ -163,3 +163,14 @@ def test_database_file_is_private(store):
 def test_similarity_basics():
     assert similarity("the cat sat on the mat", "the cat sat on the mat") == 1.0
     assert similarity("apples and pears", "spanner and wrench") == 0.0
+
+
+def test_recall_gives_full_text_for_top_hits(tmp_path):
+    from chat_memory.store import Store
+
+    s = Store(tmp_path / "m.db")
+    long = "The greenhouse heater runs on a timer. " * 20
+    s.remember("Greenhouse heater", long)
+    s.remember("Shed", "The shed is next to the greenhouse, mostly empty.")
+    hits = s.recall("greenhouse heater timer")
+    assert hits[0]["content"] == long.strip() and "preview" not in hits[0]

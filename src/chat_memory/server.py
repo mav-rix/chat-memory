@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -17,8 +18,11 @@ from .store import KINDS, Store, StoreError, default_db_path
 INSTRUCTIONS = f"""\
 Persistent memory that survives between chat sessions. Use it quietly; don't announce each call.
 
-START OF A SESSION: call get_profile once to load pinned facts and preferences. When a topic
-comes up that past sessions may have covered, call recall before answering.
+WHEN TO LOOK: when the request may depend on past sessions (the user's setup, devices, projects,
+earlier decisions or preferences), call recall once with a few good keywords before answering.
+The strongest hits come back in full, so you rarely need get_memory. Skip memory entirely for
+self-contained requests. Call get_profile only when the user asks what you know about them or
+the session is open-ended personal help.
 
 SAVE (remember) only things likely to matter in a future session:
   - durable facts about the user, their setup, people and projects
@@ -53,15 +57,36 @@ def store() -> Store:
     return Store(default_db_path(), embedder=load_embedder())
 
 
+def _log(tool: str, chars: int, ok: bool) -> None:
+    try:
+        store().log_call(tool, chars, ok)
+    except Exception:  # the usage log must never break a tool call
+        pass
+
+
 def _tool_errors(fn):
+    """Turn StoreError into ToolError, and log each call's size (not its content)."""
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except StoreError as e:
+            _log(fn.__name__, len(str(e)), ok=False)
             raise ToolError(str(e)) from e
+        _log(fn.__name__, len(json.dumps(result, ensure_ascii=False, default=str)), ok=True)
+        return result
 
     return wrapper
+
+
+def fixed_cost_chars() -> int:
+    """Text every session pays for before any call: instructions plus tool definitions."""
+    import asyncio
+
+    tools = asyncio.run(mcp.list_tools())
+    defs = [t.model_dump(exclude_none=True) if hasattr(t, "model_dump") else t for t in tools]
+    return len(INSTRUCTIONS) + len(json.dumps(defs, default=str))
 
 
 @mcp.tool()
@@ -90,7 +115,8 @@ def recall(
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     """Search memories by keywords and meaning (when the embedding model is installed).
-    Returns short previews ranked by score; use get_memory for full text."""
+    Ranked results; the strongest come with full content, the rest with a preview
+    (use get_memory for those)."""
     return store().recall(query, limit, project, kind, include_superseded)
 
 
@@ -197,6 +223,8 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
     sub.add_parser("reindex", help="embed any memories that are missing embeddings")
     sub.add_parser("stats", help="show memory counts and search mode")
+    us = sub.add_parser("usage", help="estimated tokens used by memory tool calls")
+    us.add_argument("--days", type=int, default=30)
     ex = sub.add_parser("export", help="back up memories as JSON Lines")
     ex.add_argument("file", nargs="?", default="-", help="output file (default: standard output)")
     ex.add_argument("--include-forgotten", action="store_true", help="also export forgotten memories")
@@ -240,6 +268,16 @@ def _run(args, json, sys, transfer) -> None:
         print(f"Embedded {store().backfill_embeddings()} memories.")
     elif args.cmd == "stats":
         print(json.dumps({"database": str(default_db_path()), **store().stats()}, indent=2))
+    elif args.cmd == "usage":
+        u = store().usage(args.days)
+        fixed = round(fixed_cost_chars() / 4)
+        print(f"Fixed cost per session (instructions + tool definitions): ~{fixed} tokens")
+        print(f"Tool calls in the last {u['days']} days: ~{u['est_tokens_total']} tokens returned")
+        for t in u["tools"]:
+            err = f", {t['errors']} errors" if t["errors"] else ""
+            print(f"  {t['tool']:<14} {t['calls']:>4} calls  ~{t['est_tokens']:>6} tokens  "
+                  f"(~{t['avg_tokens_per_call']} per call{err})")
+        print("Estimates use 4 characters ≈ 1 token.")
     elif args.cmd == "export":
         if args.file == "-":
             transfer.export_jsonl(store(), sys.stdout, args.include_forgotten)

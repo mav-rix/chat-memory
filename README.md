@@ -72,7 +72,7 @@ Set `CHAT_MEMORY_DB` to store the database somewhere else (see `.env.example`).
 |---|---|
 | `get_profile` | Session-start briefing: pinned memories, preferences, most-used facts |
 | `remember` | Save a memory (handles topic keys, duplicates and near-duplicates) |
-| `recall` | Hybrid keyword + meaning search, returning ranked previews |
+| `recall` | Hybrid keyword + meaning search; the strongest hits come back in full, the rest as previews |
 | `get_memory` | One memory in full, optionally with its version history |
 | `update_memory` | Edit a memory (previous text kept), or pin it |
 | `supersede` | Mark an old memory as replaced by a newer one |
@@ -131,11 +131,23 @@ chat-memory                  # run the MCP server (stdio)
 chat-memory download-model   # fetch the embedding model
 chat-memory reindex          # embed memories that lack embeddings
 chat-memory stats            # counts and search mode
+chat-memory usage            # estimated tokens used by memory tool calls
 chat-memory review           # what needs tidying
 chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
 chat-memory import PATH      # merge an export or a Claude Code memory folder (--dry-run)
 chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
 ```
+
+## Token use
+
+Every tool call means the AI re-reads the whole conversation, so the number of round trips
+matters far more than the size of each answer. `recall` therefore returns the full text of its
+best hits (up to 3, within 8,000 characters), and the instructions ask for a single `recall`
+only when past context could matter, not a `get_profile` at every session start. In tests
+with Claude Code this cut tokens on memory-backed questions by roughly 45%, and added
+nothing measurable to questions that need no memory (Claude Code loads MCP tool definitions
+on demand). `chat-memory usage` shows what the tools have returned; it logs only tool names
+and sizes, never content.
 
 ## Development
 
@@ -152,6 +164,7 @@ The pre-commit hook needs [gitleaks](https://github.com/gitleaks/gitleaks) on yo
 1. ~~Keyword search, topic keys, duplicate and secret guards~~ (0.1)
 2. ~~Optional meaning-based search, mixed with keyword scores~~ (0.2)
 3. ~~Export and import, near-duplicate and conflict review, restore~~ (0.3)
+4. ~~Usage log, fewer round trips~~ (0.4)
 
 ## Credits
 

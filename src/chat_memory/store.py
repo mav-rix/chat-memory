@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from .redact import find_secrets, strip_private
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 KINDS = ("fact", "preference", "project", "decision", "event", "person", "howto", "summary")
 
@@ -42,6 +42,9 @@ SEM_RELATED = 0.45
 SEM_RECALL_FLOOR = 0.20
 SEMANTIC_WEIGHT, KEYWORD_WEIGHT = 0.7, 0.3
 PINNED_BONUS = 0.05
+# recall() returns full text (not a preview) for up to this many top hits within this budget.
+FULL_TEXT_HITS = 3
+FULL_TEXT_BUDGET = 8000
 # review(): pairs at or above this cosine are listed as possible conflicts (changed facts
 # scored 0.61-0.74 in calibration); keyword-only mode uses word overlap instead.
 REVIEW_COSINE = 0.60
@@ -87,6 +90,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_topic
 CREATE INDEX IF NOT EXISTS idx_mem_hash    ON memories(normalized_hash);
 CREATE INDEX IF NOT EXISTS idx_mem_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_mem_updated ON memories(updated_at DESC);
+
+-- Usage log: which tool ran and how much text it returned. Never the content itself.
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      TEXT    NOT NULL,
+    tool    TEXT    NOT NULL,
+    chars   INTEGER NOT NULL,
+    ok      INTEGER NOT NULL DEFAULT 1
+);
 
 CREATE TABLE IF NOT EXISTS memory_versions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -771,8 +783,16 @@ class Store:
                 [(now, r["id"]) for r in rows],
             )
         out = []
-        for r in rows:
+        budget = FULL_TEXT_BUDGET
+        best = scores[rows[0]["id"]] if rows else 0.0
+        for n, r in enumerate(rows):
             item = {**self._summary(r), "score": round(scores[r["id"]], 3)}
+            # Full text for the strongest hits saves the AI a get_memory round trip, which
+            # costs far more (the whole conversation is re-read) than the extra text.
+            if n < FULL_TEXT_HITS and scores[r["id"]] >= 0.6 * best and len(r["content"]) <= budget:
+                item.pop("preview")
+                item["content"] = r["content"]
+                budget -= len(r["content"])
             if r["superseded_by"]:
                 item["superseded_by"] = r["superseded_by"]
             out.append(item)
@@ -900,6 +920,27 @@ class Store:
                 "SELECT * FROM memories WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?"
             ),
         }
+
+    # ── usage log ──────────────────────────────────────────────────────────
+    def log_call(self, tool: str, chars: int, ok: bool = True) -> None:
+        self.db.execute(
+            "INSERT INTO tool_calls(at, tool, chars, ok) VALUES (?,?,?,?)", (_now(), tool, chars, int(ok))
+        )
+
+    def usage(self, days: int = 30) -> dict[str, Any]:
+        """Per-tool call counts and returned text, as a rough token estimate (4 chars ≈ 1 token)."""
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+        rows = self.db.execute(
+            """SELECT tool, COUNT(*) AS calls, SUM(chars) AS chars, SUM(1 - ok) AS errors
+               FROM tool_calls WHERE at >= ? GROUP BY tool ORDER BY SUM(chars) DESC""",
+            (cutoff,),
+        ).fetchall()
+        tools = [
+            {"tool": r["tool"], "calls": r["calls"], "errors": r["errors"],
+             "est_tokens": round(r["chars"] / 4), "avg_tokens_per_call": round(r["chars"] / 4 / r["calls"])}
+            for r in rows
+        ]
+        return {"days": days, "tools": tools, "est_tokens_total": sum(t["est_tokens"] for t in tools)}
 
     def stats(self) -> dict[str, Any]:
         r = self.db.execute(

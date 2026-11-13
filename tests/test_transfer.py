@@ -222,3 +222,23 @@ def test_cli_review_prints(tmp_path, monkeypatch, capsys):
     main(["review"])
     assert "Nothing to tidy" in capsys.readouterr().out
     server.store.cache_clear()
+
+
+# ── usage log ──────────────────────────────────────────────────────────────
+def test_tool_calls_are_logged_without_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
+    from chat_memory import server
+
+    server.store.cache_clear()
+    server.remember("Bins", "Recycling goes out on Tuesday night.")
+    server.recall("recycling")
+    with pytest.raises(Exception):
+        server.get_memory(999)
+    rows = server.store().db.execute("SELECT * FROM tool_calls").fetchall()
+    assert [r["tool"] for r in rows] == ["remember", "recall", "get_memory"]
+    assert "Recycling" not in json.dumps([dict(r) for r in rows])
+    u = server.store().usage()
+    assert {t["tool"] for t in u["tools"]} == {"remember", "recall", "get_memory"}
+    assert server.fixed_cost_chars() > 1000
+    server.store.cache_clear()
