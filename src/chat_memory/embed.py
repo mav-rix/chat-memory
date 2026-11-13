@@ -20,6 +20,7 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 MODEL_REPO = "sentence-transformers/all-MiniLM-L6-v2"  # Apache-2.0
 MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 DIMENSIONS = 384
+WINDOWS = os.name == "nt"
 MAX_TOKENS = 256
 
 MODEL_FILES = {
@@ -31,8 +32,11 @@ MODEL_FILES = {
 def model_dir() -> Path:
     if env := os.environ.get("CHAT_MEMORY_MODEL_DIR"):
         return Path(env).expanduser()
-    base = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
-    return Path(base).expanduser() / "chat-memory" / "models" / MODEL_NAME / MODEL_REVISION[:12]
+    if WINDOWS and os.environ.get("LOCALAPPDATA"):
+        base = Path(os.environ["LOCALAPPDATA"])
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser()
+    return base / "chat-memory" / "models" / MODEL_NAME / MODEL_REVISION[:12]
 
 
 def semantic_disabled() -> bool:

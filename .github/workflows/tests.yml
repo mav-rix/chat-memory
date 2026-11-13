@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[dev,semantic]"
+      - name: Tests (keyword-only and fake embedder; real-model tests skip)
+        run: python -m pytest -q
+      - name: Command line smoke test
+        shell: bash
+        env:
+          CHAT_MEMORY_DB: ${{ runner.temp }}/smoke.db
+        run: |
+          chat-memory stats
+          chat-memory review
+          chat-memory usage
+          chat-memory export "$RUNNER_TEMP/backup.jsonl"
+          chat-memory import "$RUNNER_TEMP/backup.jsonl" --dry-run

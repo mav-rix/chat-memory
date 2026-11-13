@@ -156,6 +156,8 @@ def test_fts_syntax_in_query_is_safe(store):
 
 
 def test_database_file_is_private(store):
+    if os.name == "nt":
+        pytest.skip("POSIX permissions; Windows relies on the user profile's ACLs")
     mode = stat.S_IMODE(os.stat(store.path).st_mode)
     assert mode == 0o600
 
@@ -174,3 +176,15 @@ def test_recall_gives_full_text_for_top_hits(tmp_path):
     s.remember("Shed", "The shed is next to the greenhouse, mostly empty.")
     hits = s.recall("greenhouse heater timer")
     assert hits[0]["content"] == long.strip() and "preview" not in hits[0]
+
+
+def test_windows_paths_use_localappdata(monkeypatch, tmp_path):
+    from chat_memory import embed, store as store_mod
+
+    monkeypatch.delenv("CHAT_MEMORY_DB", raising=False)
+    monkeypatch.delenv("CHAT_MEMORY_MODEL_DIR", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(store_mod, "WINDOWS", True)
+    monkeypatch.setattr(embed, "WINDOWS", True)
+    assert store_mod.default_db_path() == tmp_path / "chat-memory" / "memory.db"
+    assert embed.model_dir().is_relative_to(tmp_path / "chat-memory" / "models")

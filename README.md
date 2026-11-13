@@ -5,7 +5,8 @@ lasts between sessions. It needs no cloud service, no GPU and no background serv
 SQLite file and Python.
 
 - **Local only.** Memories live in a single SQLite file on your machine
-  (default `~/.local/share/chat-memory/memory.db`, readable only by you).
+  (default `~/.local/share/chat-memory/memory.db`, or `%LOCALAPPDATA%\chat-memory` on
+  Windows; readable only by you).
 - **Hybrid search.** Keyword search (SQLite FTS5), plus optional meaning-based search with a
   small CPU model (`all-MiniLM-L6-v2`, ONNX). "Where's my vegetable patch?" finds the allotment.
 - **No duplicates piling up.** Exact duplicates are counted, not re-saved. Near-duplicates are
@@ -23,7 +24,8 @@ and guards against duplicates. That split keeps it light enough for an ordinary 
 
 ## Install
 
-Requires Python 3.11+.
+Requires Python 3.11+ and works on Linux, macOS and Windows. (Windows: see
+[the Windows section](#windows) for the commands.)
 
 ```bash
 git clone https://github.com/mav-rix/chat-memory.git
@@ -39,7 +41,7 @@ python3 -m venv .venv
 .venv/bin/chat-memory download-model   # ~90 MB, pinned revision, SHA-256 checked
 ```
 
-The model is stored in `~/.cache/chat-memory/models/` and loads on the first search, so a
+The model is stored in `~/.cache/chat-memory/models/` (Windows: `%LOCALAPPDATA%\chat-memory\models`) and loads on the first search, so a
 session that never searches stays at about 75 MB of RAM (about 275 MB once loaded). Existing
 memories are embedded automatically the first time they're needed, or run
 `chat-memory reindex`. Set `CHAT_MEMORY_SEMANTIC=0` to switch it off.
@@ -65,6 +67,43 @@ Add to the client's MCP config (adjust the path):
 ```
 
 Set `CHAT_MEMORY_DB` to store the database somewhere else (see `.env.example`).
+
+### Windows
+
+In PowerShell. Check `py --version` shows 3.11 or newer first (otherwise
+`winget install Python.Python.3.12`).
+
+```powershell
+git clone https://github.com/mav-rix/chat-memory.git
+cd chat-memory
+py -3 -m venv .venv
+.venv\Scripts\pip install -e ".[semantic]"        # or just -e . for keyword-only search
+.venv\Scripts\chat-memory download-model         # optional, ~90 MB
+claude mcp add --scope user chat-memory -- "$PWD\.venv\Scripts\chat-memory.exe"
+claude mcp list                                   # should show chat-memory: Connected
+```
+
+- **Where things live:** the database is `%LOCALAPPDATA%\chat-memory\memory.db` and the model
+  is under `%LOCALAPPDATA%\chat-memory\models`. They're protected by your Windows user
+  account's folder permissions (the Linux/macOS "owner only" file mode doesn't apply).
+- **Claude Desktop:** in its JSON config, double the backslashes:
+  `"command": "C:\\Users\\you\\chat-memory\\.venv\\Scripts\\chat-memory.exe"`.
+- **Don't move the folder** after registering it; Claude Code runs the server from there.
+  If you do, run `claude mcp remove chat-memory --scope user` and add it again.
+- **Keep the database out of OneDrive/Dropbox.** Syncing a live SQLite file can corrupt it.
+  Use `export`/`import` to copy memories between machines.
+
+### Behind a company network
+
+- **pip:** use your company's package mirror or proxy (`pip install --proxy ...` or
+  `pip config set global.index-url ...`).
+- **Model download:** set `HTTPS_PROXY` if needed. Python uses the Windows certificate store,
+  so company TLS inspection usually works. If huggingface.co is blocked, everything still
+  works with keyword search; or download `onnx/model.onnx` and `tokenizer.json` from the pinned
+  revision another way, put them in one folder and point `CHAT_MEMORY_MODEL_DIR` at it.
+- **Managed Claude Code:** your IT team may only allow approved MCP servers. If
+  `claude mcp list` doesn't show it, that's likely why. Check that keeping work chat memories
+  in a local file is allowed.
 
 ## Tools
 

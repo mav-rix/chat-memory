@@ -28,6 +28,7 @@ from typing import Any, Protocol
 from .redact import find_secrets, strip_private
 
 SCHEMA_VERSION = 3
+WINDOWS = os.name == "nt"
 
 KINDS = ("fact", "preference", "project", "decision", "event", "person", "howto", "summary")
 
@@ -139,8 +140,14 @@ class StoreError(Exception):
 def default_db_path() -> Path:
     if env := os.environ.get("CHAT_MEMORY_DB"):
         return Path(env).expanduser()
-    base = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
-    return Path(base).expanduser() / "chat-memory" / "memory.db"
+    return data_home() / "chat-memory" / "memory.db"
+
+
+def data_home() -> Path:
+    """Per-user data folder: %LOCALAPPDATA% on Windows, XDG_DATA_HOME or ~/.local/share elsewhere."""
+    if WINDOWS and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"])
+    return Path(os.environ.get("XDG_DATA_HOME") or "~/.local/share").expanduser()
 
 
 def _now() -> str:

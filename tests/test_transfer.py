@@ -148,7 +148,8 @@ def test_export_file_is_private_and_cli_roundtrip(tmp_path, monkeypatch, capsys)
     server.store().remember("Bins", "Recycling goes out on Tuesday night.")
     out = tmp_path / "backup.jsonl"
     main(["export", str(out)])
-    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
 
     server.store.cache_clear()
     monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "b.db"))

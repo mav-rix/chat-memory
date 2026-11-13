@@ -239,6 +239,11 @@ def main(argv: list[str] | None = None) -> None:
     pg.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     args = p.parse_args(argv)
 
+    if args.cmd not in (None, "serve"):
+        # Windows consoles and redirected output may not be UTF-8; never crash on a "→".
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         _run(args, json, sys, transfer)
     except StoreError as e:

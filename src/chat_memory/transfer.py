@@ -43,7 +43,8 @@ def export_jsonl(store: Store, out, include_forgotten: bool = False) -> int:
 def export_to_file(store: Store, path: Path, include_forgotten: bool = False) -> int:
     """Write an export readable only by the owner (it holds personal data)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, 0o600)
+    if hasattr(os, "fchmod"):  # POSIX; on Windows the user profile's permissions apply
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         return export_jsonl(store, f, include_forgotten)
 
