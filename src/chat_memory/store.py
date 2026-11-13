@@ -8,6 +8,9 @@ Design (borrowed ideas, our own code):
   * normalized-hash exact-duplicate detection (Engram).
   * superseding instead of deleting (mcp-memory-service, Apache-2.0).
   * near-duplicate check before saving, with the decision left to the AI.
+  * optional semantic search: embeddings stored in the row and compared by
+    brute force (fast enough for tens of thousands of memories), mixed with
+    keyword scores 0.7 / 0.3 (weights from mcp-memory-service).
 """
 
 from __future__ import annotations
@@ -16,20 +19,34 @@ import hashlib
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .redact import find_secrets, strip_private
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 KINDS = ("fact", "preference", "project", "decision", "event", "person", "howto", "summary")
 
 # Word-overlap thresholds (Jaccard) for the near-duplicate check.
 DUPLICATE_THRESHOLD = 0.8  # at or above: probably the same memory, don't save without force
 RELATED_THRESHOLD = 0.25  # at or above: related, worth showing to the AI (tune with real data)
+
+# Cosine thresholds for all-MiniLM-L6-v2, calibrated on sample pairs:
+# paraphrased duplicates 0.82-0.92, updates/conflicts 0.61-0.74, related 0.21-0.38, unrelated <= 0.11.
+SEM_DUPLICATE = 0.80
+SEM_RELATED = 0.45
+SEM_RECALL_FLOOR = 0.20
+SEMANTIC_WEIGHT, KEYWORD_WEIGHT = 0.7, 0.3
+PINNED_BONUS = 0.05
+
+
+class EmbedderLike(Protocol):
+    name: str
+
+    def embed(self, texts: list[str]) -> Any: ...  # (n, dims) float32, L2-normalised
 
 _STOPWORDS = frozenset(
     """a an and are as at be been but by can did do does for from had has have he her his i if in
@@ -56,7 +73,9 @@ CREATE TABLE IF NOT EXISTS memories (
     last_used_at    TEXT,
     superseded_by   INTEGER REFERENCES memories(id),
     deleted_at      TEXT,
-    delete_reason   TEXT
+    delete_reason   TEXT,
+    embedding       BLOB,
+    embedding_model TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_topic
     ON memories(topic_key) WHERE topic_key IS NOT NULL AND deleted_at IS NULL;
@@ -150,6 +169,11 @@ def _clean_tags(tags: list[str] | str | None) -> str:
 @dataclass
 class Store:
     path: Path
+    embedder: EmbedderLike | None = None
+    _writes: int = field(default=0, init=False, repr=False)
+    _vec_key: tuple | None = field(default=None, init=False, repr=False)
+    _vec_ids: Any = field(default=None, init=False, repr=False)
+    _vec_mat: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -163,6 +187,10 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA busy_timeout=5000")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(memories)")}
+        if cols and "embedding" not in cols:  # v1 → v2
+            self.db.execute("ALTER TABLE memories ADD COLUMN embedding BLOB")
+            self.db.execute("ALTER TABLE memories ADD COLUMN embedding_model TEXT")
         self.db.executescript(_SCHEMA)
         self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if new_file:
@@ -198,8 +226,79 @@ class Store:
         d = dict(row)
         d["tags"] = row["tags"].split(",") if row["tags"] else []
         d["pinned"] = bool(row["pinned"])
-        d.pop("normalized_hash", None)
+        for internal in ("normalized_hash", "embedding", "embedding_model"):
+            d.pop(internal, None)
         return d
+
+    # ── embeddings ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _vec_text(title: str, content: str) -> str:
+        return f"{title}\n{content}"
+
+    # Embeddings use the content only: different titles on the same fact pulled paraphrase
+    # scores down to the level of genuine updates (0.74 vs 0.82 without titles). Titles
+    # still count through keyword search.
+
+    def _embed(self, text: str) -> Any:
+        return self.embedder.embed([text])[0] if self.embedder else None
+
+    def _embedding_cols(self, vec: Any) -> tuple[bytes | None, str | None]:
+        if vec is None:
+            return None, None
+        return vec.astype("float32").tobytes(), self.embedder.name
+
+    def backfill_embeddings(self) -> int:
+        """Embed memories that have no embedding (or one from a different model)."""
+        if not self.embedder:
+            return 0
+        done = 0
+        while True:
+            rows = self.db.execute(
+                """SELECT id, title, content FROM memories WHERE deleted_at IS NULL
+                   AND (embedding IS NULL OR embedding_model IS NOT ?) LIMIT 256""",
+                (self.embedder.name,),
+            ).fetchall()
+            if not rows:
+                break
+            vecs = self.embedder.embed([r["content"] for r in rows])
+            self.db.executemany(
+                "UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ?",
+                [(*self._embedding_cols(v), r["id"]) for v, r in zip(vecs, rows)],
+            )
+            self._writes += 1
+            done += len(rows)
+        return done
+
+    def _vectors(self) -> tuple[Any, Any]:
+        """(ids, matrix) of all non-deleted embeddings, cached until the database changes."""
+        import numpy as np
+
+        self.backfill_embeddings()
+        key = (self.db.execute("PRAGMA data_version").fetchone()[0], self._writes)
+        if key != self._vec_key:
+            rows = self.db.execute(
+                "SELECT id, embedding FROM memories WHERE deleted_at IS NULL AND embedding_model = ?",
+                (self.embedder.name,),
+            ).fetchall()
+            self._vec_ids = np.array([r["id"] for r in rows], dtype=np.int64)
+            self._vec_mat = (
+                np.frombuffer(b"".join(r["embedding"] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+                if rows
+                else np.zeros((0, 1), dtype=np.float32)
+            )
+            self._vec_key = key
+        return self._vec_ids, self._vec_mat
+
+    def _semantic(self, vec: Any, k: int, floor: float) -> dict[int, float]:
+        """Top-k memory ids by cosine similarity to ``vec`` (vectors are normalised)."""
+        import numpy as np
+
+        ids, mat = self._vectors()
+        if not len(ids):
+            return {}
+        sims = mat @ vec
+        top = np.argsort(-sims)[:k] if len(sims) <= k else np.argpartition(-sims, k)[:k]
+        return {int(ids[i]): float(sims[i]) for i in top if sims[i] >= floor}
 
     def _check_text(self, title: str, content: str) -> tuple[str, str]:
         title, content = strip_private(title).strip(), strip_private(content).strip()
@@ -218,26 +317,46 @@ class Store:
             (row["id"], row["revision_count"], row["title"], row["content"], row["updated_at"]),
         )
 
-    def similar(self, text: str, limit: int = 3, exclude_id: int | None = None) -> list[dict[str, Any]]:
-        """Active memories most similar to ``text`` by word overlap (FTS5 finds candidates)."""
-        q = _fts_query(text, max_terms=24)
-        if not q:
+    def similar(
+        self, text: str, limit: int = 3, exclude_id: int | None = None, vec: Any = None
+    ) -> list[dict[str, Any]]:
+        """Active memories most similar to ``text``.
+
+        Candidates come from keyword search and, when available, embeddings. Each gets a
+        word-overlap score and a cosine score; ``duplicate`` is set when either crosses its
+        duplicate threshold.
+        """
+        cos: dict[int, float] = {}
+        if self.embedder:
+            vec = self._embed(text) if vec is None else vec
+            cos = self._semantic(vec, k=10, floor=SEM_RELATED)
+        candidate_ids = set(cos)
+        if q := _fts_query(text, max_terms=24):
+            candidate_ids |= {
+                r[0]
+                for r in self.db.execute(
+                    "SELECT rowid FROM memories_fts WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) LIMIT 25",
+                    (q,),
+                )
+            }
+        candidate_ids.discard(exclude_id)
+        if not candidate_ids:
             return []
+        marks = ",".join("?" * len(candidate_ids))
         rows = self.db.execute(
-            f"""SELECT m.* FROM memories_fts f JOIN memories m ON m.id = f.rowid
-                WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.superseded_by IS NULL
-                ORDER BY bm25(memories_fts) LIMIT 25""",
-            (q,),
+            f"SELECT * FROM memories WHERE id IN ({marks}) AND {_ACTIVE}", tuple(candidate_ids)
         ).fetchall()
         scored = []
         for r in rows:
-            if r["id"] == exclude_id:
-                continue
-            s = similarity(text, f"{r['title']}\n{r['content']}")
-            if s >= RELATED_THRESHOLD:
-                scored.append((s, r))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [{**self._summary(r), "similarity": round(s, 2)} for s, r in scored[:limit]]
+            jac = similarity(text, self._vec_text(r["title"], r["content"]))
+            c = cos.get(r["id"], 0.0)
+            if jac >= RELATED_THRESHOLD or c >= SEM_RELATED:
+                dup = jac >= DUPLICATE_THRESHOLD or c >= SEM_DUPLICATE
+                scored.append((max(jac, c), dup, r))
+        scored.sort(key=lambda x: (x[1], x[0]), reverse=True)
+        return [
+            {**self._summary(r), "similarity": round(s, 2), "duplicate": dup} for s, dup, r in scored[:limit]
+        ]
 
     # ── write operations ───────────────────────────────────────────────────
     def remember(
@@ -270,15 +389,17 @@ class Store:
                         (now, row["id"]),
                     )
                     return {"action": "unchanged", "id": row["id"], "message": "Topic already says exactly this."}
+                emb, emb_model = self._embedding_cols(self._embed(content))
                 self.db.execute("BEGIN")
                 self._save_version(row)
                 self.db.execute(
                     """UPDATE memories SET title=?, content=?, kind=?, tags=?, project=COALESCE(?, project),
-                       normalized_hash=?, revision_count=revision_count+1, updated_at=?, superseded_by=NULL
-                       WHERE id=?""",
-                    (title, content, kind, tags_s or row["tags"], project, h, now, row["id"]),
+                       normalized_hash=?, revision_count=revision_count+1, updated_at=?, superseded_by=NULL,
+                       embedding=?, embedding_model=? WHERE id=?""",
+                    (title, content, kind, tags_s or row["tags"], project, h, now, emb, emb_model, row["id"]),
                 )
                 self.db.execute("COMMIT")
+                self._writes += 1
                 return {
                     "action": "updated",
                     "id": row["id"],
@@ -297,8 +418,9 @@ class Store:
             return {"action": "duplicate", "id": row["id"], "message": "Already remembered; nothing new saved."}
 
         # 3. Near-duplicates → let the AI decide unless it already has (force).
-        similar = self.similar(f"{title}\n{content}")
-        if not force and similar and similar[0]["similarity"] >= DUPLICATE_THRESHOLD:
+        vec = self._embed(content)
+        similar = self.similar(self._vec_text(title, content), vec=vec)
+        if not force and similar and similar[0]["duplicate"]:
             return {
                 "action": "needs_review",
                 "id": None,
@@ -311,10 +433,11 @@ class Store:
 
         cur = self.db.execute(
             """INSERT INTO memories(topic_key, kind, title, content, tags, project, normalized_hash,
-                                    created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (topic_key, kind, title, content, tags_s, project, h, now, now),
+                                    created_at, updated_at, embedding, embedding_model)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (topic_key, kind, title, content, tags_s, project, h, now, now, *self._embedding_cols(vec)),
         )
+        self._writes += 1
         result: dict[str, Any] = {"action": "created", "id": cur.lastrowid}
         if similar:
             result["similar"] = similar
@@ -340,12 +463,19 @@ class Store:
         if kind is not None and kind.strip().lower() not in KINDS:
             raise StoreError(f"Unknown kind '{kind}'. Use one of: {', '.join(KINDS)}.")
         text_changed = (new_title, new_content) != (row["title"], row["content"])
+        content_changed = new_content != row["content"]
+        if content_changed and self.embedder:
+            emb, emb_model = self._embedding_cols(self._embed(new_content))
+        else:
+            emb, emb_model = row["embedding"], row["embedding_model"]
         self.db.execute("BEGIN")
         if text_changed:
             self._save_version(row)
+        self._writes += 1
         self.db.execute(
             """UPDATE memories SET title=?, content=?, tags=?, kind=?, pinned=?, normalized_hash=?,
-               revision_count = revision_count + ?, updated_at=? WHERE id=?""",
+               revision_count = revision_count + ?, updated_at=?, embedding=?, embedding_model=?
+               WHERE id=?""",
             (
                 new_title,
                 new_content,
@@ -355,6 +485,8 @@ class Store:
                 _normalized_hash(new_title, new_content),
                 1 if text_changed else 0,
                 _now(),
+                None if content_changed and not self.embedder else emb,
+                None if content_changed and not self.embedder else emb_model,
                 memory_id,
             ),
         )
@@ -378,6 +510,7 @@ class Store:
             "UPDATE memories SET deleted_at = ?, delete_reason = ? WHERE id = ?",
             (_now(), reason.strip() or None, memory_id),
         )
+        self._writes += 1
         return {"action": "forgotten", "id": memory_id}
 
     def purge(self, older_than_days: int = 30) -> int:
@@ -386,6 +519,7 @@ class Store:
         cur = self.db.execute(
             "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,)
         )
+        self._writes += 1
         return cur.rowcount
 
     # ── read operations ────────────────────────────────────────────────────
@@ -397,11 +531,11 @@ class Store:
         kind: str | None = None,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        q = _fts_query(query)
-        if not q:
-            return []
-        where = ["memories_fts MATCH ?", "m.deleted_at IS NULL"]
-        args: list[Any] = [q]
+        """Hybrid search: keyword (BM25) and, when available, meaning (cosine) scores, mixed
+        0.3 / 0.7. Without embeddings this is plain keyword search."""
+        limit = max(1, min(limit, 50))
+        where = ["m.deleted_at IS NULL"]
+        args: list[Any] = []
         if not include_superseded:
             where.append("m.superseded_by IS NULL")
         if project:
@@ -410,13 +544,45 @@ class Store:
         if kind:
             where.append("m.kind = ?")
             args.append(kind.strip().lower())
-        # bm25 is negative (lower = better); pinned memories get a nudge.
-        rows = self.db.execute(
-            f"""SELECT m.*, bm25(memories_fts, 3.0, 1.0, 2.0) - (m.pinned * 2.0) AS score
-                FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-                WHERE {' AND '.join(where)} ORDER BY score LIMIT ?""",
-            (*args, max(1, min(limit, 50))),
-        ).fetchall()
+        filters = " AND ".join(where)
+
+        # Keyword candidates. bm25() is negative; lower is better.
+        kw: dict[int, float] = {}
+        if q := _fts_query(query):
+            kw = {
+                r[0]: r[1]
+                for r in self.db.execute(
+                    f"""SELECT m.id, bm25(memories_fts, 3.0, 1.0, 2.0)
+                        FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+                        WHERE memories_fts MATCH ? AND {filters}
+                        ORDER BY bm25(memories_fts, 3.0, 1.0, 2.0) LIMIT 50""",
+                    (q, *args),
+                )
+            }
+        # Meaning candidates.
+        sem: dict[int, float] = {}
+        if self.embedder and query.strip():
+            sem = self._semantic(self._embed(query), k=50, floor=SEM_RECALL_FLOOR)
+        ids = set(kw) | set(sem)
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = {
+            r["id"]: r
+            for r in self.db.execute(
+                f"SELECT * FROM memories m WHERE m.id IN ({marks}) AND {filters}", (*ids, *args)
+            )
+        }
+        best_kw = min(kw.values(), default=0.0)
+
+        def score(mid: int) -> float:
+            k = kw[mid] / best_kw if mid in kw and best_kw < 0 else (1.0 if mid in kw else 0.0)
+            s = (SEMANTIC_WEIGHT * sem.get(mid, 0.0) + KEYWORD_WEIGHT * k) if self.embedder else k
+            return s + (PINNED_BONUS if rows[mid]["pinned"] else 0.0)
+
+        ranked = sorted(rows, key=score, reverse=True)[:limit]
+        scores = {mid: score(mid) for mid in ranked}
+        rows = [rows[mid] for mid in ranked]
         if rows:
             now = _now()
             self.db.executemany(
@@ -425,7 +591,7 @@ class Store:
             )
         out = []
         for r in rows:
-            item = self._summary(r)
+            item = {**self._summary(r), "score": round(scores[r["id"]], 3)}
             if r["superseded_by"]:
                 item["superseded_by"] = r["superseded_by"]
             out.append(item)
@@ -495,12 +661,15 @@ class Store:
             ),
         }
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         r = self.db.execute(
             f"""SELECT COUNT(*) AS total,
                    SUM({_ACTIVE}) AS active,
                    SUM(superseded_by IS NOT NULL AND deleted_at IS NULL) AS superseded,
-                   SUM(deleted_at IS NOT NULL) AS forgotten
+                   SUM(deleted_at IS NOT NULL) AS forgotten,
+                   SUM(embedding IS NOT NULL AND deleted_at IS NULL) AS embedded
                 FROM memories"""
         ).fetchone()
-        return {k: int(r[k] or 0) for k in ("total", "active", "superseded", "forgotten")}
+        out: dict[str, Any] = {k: int(r[k] or 0) for k in ("total", "active", "superseded", "forgotten", "embedded")}
+        out["search"] = f"hybrid ({self.embedder.name})" if self.embedder else "keyword only"
+        return out

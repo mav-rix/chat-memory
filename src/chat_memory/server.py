@@ -9,6 +9,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import __version__
+from .embed import load_embedder
 from .store import KINDS, Store, StoreError, default_db_path
 
 # The instructions are the most important part of this server: they decide
@@ -46,7 +47,7 @@ mcp = MCPServer(name="chat-memory", version=__version__, instructions=INSTRUCTIO
 
 @functools.cache
 def store() -> Store:
-    return Store(default_db_path())
+    return Store(default_db_path(), embedder=load_embedder())
 
 
 def _tool_errors(fn):
@@ -85,7 +86,8 @@ def recall(
     kind: str | None = None,
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search memories by keywords. Returns short previews; use get_memory for full text."""
+    """Search memories by keywords and meaning (when the embedding model is installed).
+    Returns short previews ranked by score; use get_memory for full text."""
     return store().recall(query, limit, project, kind, include_superseded)
 
 
@@ -147,8 +149,39 @@ def review(stale_days: int = 180) -> dict[str, Any]:
     return store().review(stale_days)
 
 
-def main() -> None:
-    mcp.run()
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+    import json
+    import sys
+
+    p = argparse.ArgumentParser(prog="chat-memory", description="Local MCP memory server.")
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("serve", help="run the MCP server over stdio (the default)")
+    sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
+    sub.add_parser("reindex", help="embed any memories that are missing embeddings")
+    sub.add_parser("stats", help="show memory counts and search mode")
+    args = p.parse_args(argv)
+
+    if args.cmd in (None, "serve"):
+        mcp.run()
+    elif args.cmd == "download-model":
+        from .embed import download_model
+
+        try:
+            path = download_model()
+        except ImportError:
+            sys.exit("Install the semantic extra first: pip install 'chat-memory[semantic]'")
+        except Exception as e:  # network or checksum problems
+            sys.exit(f"Download failed: {e}")
+        print(f"Model ready in {path}. Semantic search turns on the next time the server starts.")
+        if load_embedder() is None:
+            print("Note: onnxruntime/tokenizers/numpy are missing; install 'chat-memory[semantic]'.")
+    elif args.cmd == "reindex":
+        if store().embedder is None:
+            sys.exit("Semantic search is not available (run: chat-memory download-model).")
+        print(f"Embedded {store().backfill_embeddings()} memories.")
+    elif args.cmd == "stats":
+        print(json.dumps({"database": str(default_db_path()), **store().stats()}, indent=2))
 
 
 if __name__ == "__main__":

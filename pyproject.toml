@@ -1,6 +1,6 @@
 [project]
 name = "chat-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small, local MCP server that gives AI chats persistent memory (SQLite + full-text search)."
 readme = "README.md"
 license = "MIT"
@@ -8,7 +8,8 @@ requires-python = ">=3.11"
 dependencies = ["mcp>=2.3,<3"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+semantic = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]
+dev = ["pytest>=8", "numpy>=1.26"]
 
 [project.scripts]
 chat-memory = "chat_memory.server:main"
