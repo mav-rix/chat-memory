@@ -393,7 +393,8 @@ def _run(args, json, sys, transfer) -> None:
         info = transfer.inspect_sqlite(args.path)
         for t in info["tables"]:
             mark = "  ← suggested" if t["table"] == info["suggested_table"] else ""
-            print(f"{t['table']} ({t['rows']} rows){mark}")
+            fts = ", full-text table" if t.get("storage") == "fts" else ""
+            print(f"{t['table']} ({t['rows']} rows{fts}){mark}")
             print("  " + ", ".join(f"{c} {ty}".strip() for c, ty in t["columns"]))
         if info["suggested_table"]:
             print(f"\nSuggested: --table {info['suggested_table']} " +

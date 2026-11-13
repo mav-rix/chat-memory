@@ -36,7 +36,7 @@ def service_style(tmp_path):
         tmp_path / "service.db",
         """CREATE TABLE memories (id INTEGER PRIMARY KEY, content_hash TEXT, content TEXT, tags TEXT,
                memory_type TEXT, metadata TEXT, created_at REAL, updated_at REAL, deleted_at REAL);
-           CREATE VIRTUAL TABLE memory_content_fts USING fts5(content);
+           CREATE VIRTUAL TABLE memory_content_fts USING fts5(content, content='memories', content_rowid='id');
            CREATE TABLE settings (key TEXT, value TEXT);""",
         [
             ("INSERT INTO memories VALUES (1,'h1',?,?,?,'{}',?,?,NULL)",
@@ -148,3 +148,42 @@ def test_cli_inspect_and_import(tmp_path, monkeypatch, capsys, service_style):
     with pytest.raises(SystemExit):
         main(["import", str(tmp_path / "a.db")])  # its own database
     server.store.cache_clear()
+
+
+def test_memories_kept_inside_an_fts5_table(store, tmp_path):
+    """Some tools store memories only in a full-text (FTS5) table; read it, but skip
+    full-text indexes that merely mirror another table or hold no text."""
+    path = make_db(
+        tmp_path / "fts.db",
+        """CREATE VIRTUAL TABLE memories USING fts5(title, content, tags, created_at UNINDEXED);
+           CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, text TEXT);
+           CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
+           CREATE VIRTUAL TABLE blind USING fts5(text, content='');""",
+        [
+            ("INSERT INTO memories VALUES ('Case FR-3001', 'Chargeback from 198.51.100.21 on ORD-2026-410001.', "
+             "'fraud', '2026-03-01T09:00:00')", ()),
+            ("INSERT INTO memories VALUES ('Case FR-3002', 'Gift card 6006491234567890999 PIN 1234 resold.', "
+             "'fraud', '2026-03-02T09:00:00')", ()),
+            ("INSERT INTO memories VALUES ('Note', 'Weekly fraud review is on Thursdays.', '', '2026-03-03T09:00:00')", ()),
+            ("INSERT INTO messages VALUES (1, 'user', 'hello')", ()),
+        ],
+    )
+    info = transfer.inspect_sqlite(path)
+    assert {t["table"]: t["storage"] for t in info["tables"]} == {"memories": "fts", "messages": "table"}
+    assert info["suggested_table"] == "memories"
+    report = store.import_records(transfer.read_sqlite(path))
+    assert report["created"] == 3 and report["redacted"] == 1
+    hit = store.match(["198.51.100.21"])[0]["memories"][0]
+    assert hit["title"] == "Case FR-3001"
+    assert store.import_records(transfer.read_sqlite(path, table="messages"))["created"] == 1
+
+
+def test_full_text_copy_does_not_beat_the_real_table(tmp_path):
+    path = make_db(
+        tmp_path / "copy.db",
+        """CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT, content TEXT, type TEXT, created_at TEXT);
+           CREATE VIRTUAL TABLE notes_search USING fts5(content);""",
+        [("INSERT INTO notes VALUES (1,'A','Alpha note.','fact','2026-01-01')", ()),
+         ("INSERT INTO notes_search VALUES ('Alpha note.')", ())],
+    )
+    assert transfer.inspect_sqlite(path)["suggested_table"] == "notes"

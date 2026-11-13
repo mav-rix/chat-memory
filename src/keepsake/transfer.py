@@ -153,14 +153,28 @@ def _open_readonly(path: Path):
     return db
 
 
+def _storage(sql: str) -> str | None:
+    """'table' for a plain table, 'fts' for a full-text table that holds its own text, or None
+    for something not worth reading: an index over another table (external content), a
+    contentless index, or another kind of virtual table (vectors and the like)."""
+    if not re.match(r"(?i)\s*CREATE\s+VIRTUAL", sql):
+        return "table"
+    if not re.search(r"(?i)\bUSING\s+fts[345]\b", sql):
+        return None
+    return None if re.search(r"(?i)\bcontent\s*=", sql) else "fts"
+
+
 def _tables(db) -> list[dict[str, Any]]:
     out = []
     for (name, sql) in db.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall():
-        if name.startswith("sqlite_") or _SHADOW.search(name) or (sql or "").upper().startswith("CREATE VIRTUAL"):
+        storage = _storage(sql or "")
+        if name.startswith("sqlite_") or storage is None:
             continue
+        if storage == "table" and _SHADOW.search(name):
+            continue  # internal tables behind a full-text index
         cols = [(r["name"], (r["type"] or "").upper()) for r in db.execute(f'PRAGMA table_info("{name}")')]
         rows = db.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-        out.append({"table": name, "rows": rows, "columns": cols})
+        out.append({"table": name, "rows": rows, "columns": cols, "storage": storage})
     return out
 
 

@@ -262,7 +262,9 @@ Fields you can map: `content` (required), `title` (else the first line of the co
 `kind`, `tags` (JSON list or comma-separated), `topic_key`, `project`, `created_at` and
 `updated_at` (ISO text, or Unix seconds/milliseconds), and `deleted_at` (rows with a value are
 skipped). A type that isn't a keepsake kind is kept as a `type:<name>` tag; every imported
-memory is tagged `imported`. The old database is opened read-only and never changed; close
+memory is tagged `imported`. Full-text (FTS5/FTS4) tables are read when they hold the
+memories themselves; ones that only index another table, or hold no text, are skipped. The
+old database is opened read-only and never changed; close
 the old tool first (or import a copy). Records go through the same checks as any save, so
 card expiry dates, PINs and security codes are removed and credentials are refused. Importing
 again adds nothing new.
