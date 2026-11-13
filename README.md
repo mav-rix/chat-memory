@@ -195,7 +195,33 @@ chat-memory export ~/memory-backup.jsonl     # readable only by you; warns if in
 chat-memory import ~/memory-backup.jsonl --dry-run
 chat-memory import ~/memory-backup.jsonl
 chat-memory import ~/.claude/projects/<project>/memory   # bring in Claude Code's memory files
+chat-memory import other-tool.db --dry-run                # another tool's SQLite memory database
 ```
+
+### Moving from another SQLite-based memory tool
+
+Many memory tools keep their data in SQLite, each with its own tables. `inspect` shows the
+tables, columns and row counts, and which columns it would use. It never prints row
+contents, so its output is safe to share with whoever is helping you migrate:
+
+```bash
+chat-memory inspect old-memory.db
+#   memories (1520 rows)  ← suggested
+#     id INTEGER, content TEXT, tags TEXT, memory_type TEXT, created_at REAL, ...
+#   Suggested: --table memories --map content=content --map kind=memory_type ...
+chat-memory import old-memory.db --dry-run
+chat-memory import old-memory.db                          # add --kind case for case records
+chat-memory import old-memory.db --table kb --map content=note_text --map title=heading
+```
+
+Fields you can map: `content` (required), `title` (else the first line of the content),
+`kind`, `tags` (JSON list or comma-separated), `topic_key`, `project`, `created_at` and
+`updated_at` (ISO text, or Unix seconds/milliseconds), and `deleted_at` (rows with a value are
+skipped). A type that isn't a chat-memory kind is kept as a `type:<name>` tag; every imported
+memory is tagged `imported`. The old database is opened read-only and never changed; close
+the old tool first (or import a copy). Records go through the same checks as any save, so
+card expiry dates, PINs and security codes are removed and credentials are refused. Importing
+again adds nothing new.
 
 Exports are JSON Lines: a header line, then one memory per line with its version history
 (embeddings are rebuilt on import). Import is all or nothing and safe to repeat: exact
@@ -237,7 +263,8 @@ chat-memory usage            # estimated tokens used by memory tool calls
 chat-memory review           # what needs tidying
 chat-memory match FILE       # exact hits for identifiers in a text/CSV file (--text for names)
 chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
-chat-memory import PATH      # merge an export or a Claude Code memory folder (--dry-run)
+chat-memory import PATH      # merge an export, a Claude Code memory folder or a SQLite db (--dry-run)
+chat-memory inspect DB       # another tool's tables/columns and the suggested mapping (no content)
 chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
 ```
 

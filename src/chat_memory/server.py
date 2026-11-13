@@ -274,9 +274,16 @@ def main(argv: list[str] | None = None) -> None:
     ex = sub.add_parser("export", help="back up memories as JSON Lines")
     ex.add_argument("file", nargs="?", default="-", help="output file (default: standard output)")
     ex.add_argument("--include-forgotten", action="store_true", help="also export forgotten memories")
-    im = sub.add_parser("import", help="merge a chat-memory export or a Claude Code memory folder")
-    im.add_argument("path", type=Path, help="export file (.jsonl) or a folder of Claude Code memory files")
+    im = sub.add_parser("import", help="merge an export, a Claude Code memory folder or another tool's SQLite db")
+    im.add_argument("path", type=Path, help="export (.jsonl), Claude Code memory folder, or SQLite database")
     im.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    im.add_argument("--table", help="SQLite: table to read (default: best guess, see inspect)")
+    im.add_argument("--map", action="append", default=[], metavar="FIELD=COLUMN",
+                    help="SQLite: column for a field (content, title, kind, tags, topic_key, project, "
+                         "created_at, updated_at, deleted_at); repeatable")
+    im.add_argument("--kind", help="kind for every imported memory (e.g. case)")
+    ins = sub.add_parser("inspect", help="show another SQLite memory db's tables and suggested mapping (no content)")
+    ins.add_argument("path", type=Path)
     mt = sub.add_parser("match", help="check identifiers in a file (or - for stdin) for exact hits")
     mt.add_argument("file", help="text or CSV file; every cell is checked")
     mt.add_argument("--text", action="store_true",
@@ -368,10 +375,30 @@ def _run(args, json, sys, transfer) -> None:
     elif args.cmd == "import":
         if not args.path.exists():
             sys.exit(f"No such file or folder: {args.path}")
-        report = store().import_records(transfer.read_any(args.path), dry_run=args.dry_run)
+        if Path(args.path).resolve() == default_db_path().resolve():
+            sys.exit("That's this server's own database.")
+        mapping = dict(m.split("=", 1) for m in args.map if "=" in m)
+        opts = {"table": args.table, "mapping": mapping, "kind": args.kind} if transfer.is_sqlite(args.path) else {}
+        report = store().import_records(transfer.read_any(args.path, **opts), dry_run=args.dry_run)
         transfer.print_report(report, args.dry_run)
         if not args.dry_run and report["created"] + report["updated"] and store().embedder:
             print(f"Embedded {store().backfill_embeddings()} memories for search.")
+    elif args.cmd == "inspect":
+        if not transfer.is_sqlite(args.path):
+            sys.exit(f"{args.path} is not an SQLite database.")
+        info = transfer.inspect_sqlite(args.path)
+        for t in info["tables"]:
+            mark = "  ← suggested" if t["table"] == info["suggested_table"] else ""
+            print(f"{t['table']} ({t['rows']} rows){mark}")
+            print("  " + ", ".join(f"{c} {ty}".strip() for c, ty in t["columns"]))
+        if info["suggested_table"]:
+            print(f"\nSuggested: --table {info['suggested_table']} " +
+                  " ".join(f"--map {k}={v}" for k, v in info["suggested_mapping"].items()))
+            print("Check with: chat-memory import PATH --dry-run (add --table/--map to override).")
+            if "content" not in info["suggested_mapping"]:
+                print("No obvious text column: add --map content=COLUMN.")
+        else:
+            print("\nNo table with an obvious text column; pass --table and --map content=COLUMN.")
     elif args.cmd == "review":
         r = store().review(args.stale_days)
         print(json.dumps(r, indent=2)) if args.json else _print_review(r)
