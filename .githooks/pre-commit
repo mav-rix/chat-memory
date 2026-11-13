@@ -1,0 +1,8 @@
+#!/bin/sh
+# Block commits that contain secrets. Enable with: git config core.hooksPath .githooks
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks is not installed, so this commit is blocked." >&2
+    echo "Install it from https://github.com/gitleaks/gitleaks/releases and put it on your PATH." >&2
+    exit 1
+fi
+exec gitleaks git --pre-commit --staged --redact --no-banner

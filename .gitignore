@@ -1,0 +1,39 @@
+# ── Your memories: never commit ─────────────────────────────
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+backups/
+exports/
+archive/
+*.jsonl
+memory.json
+
+# ── Secrets and local config ────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.claude/settings.local.json
+.mcp.json
+
+# ── Models (downloaded on first use) ────────────────────────
+models/
+*.onnx
+
+# ── Python / tooling ────────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.log
