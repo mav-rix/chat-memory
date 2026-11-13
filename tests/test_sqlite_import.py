@@ -7,9 +7,9 @@ import sqlite3
 
 import pytest
 
-from chat_memory import transfer
-from chat_memory.server import main
-from chat_memory.store import Store, StoreError
+from keepsake import transfer
+from keepsake.server import main
+from keepsake.store import Store, StoreError
 
 
 @pytest.fixture
@@ -130,9 +130,9 @@ def test_reimport_adds_nothing(store, service_style):
 
 
 def test_cli_inspect_and_import(tmp_path, monkeypatch, capsys, service_style):
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
-    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
-    from chat_memory import server
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
 
     server.store.cache_clear()
     main(["inspect", str(service_style)])

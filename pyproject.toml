@@ -1,6 +1,6 @@
 [project]
-name = "chat-memory"
-version = "0.5.3"
+name = "keepsake"
+version = "0.6.0"
 description = "A small, local MCP server that gives AI chats persistent memory (Claude Code, GitHub Copilot and other MCP clients)."
 readme = "README.md"
 license = "MIT"
@@ -12,14 +12,14 @@ semantic = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]
 dev = ["pytest>=8", "numpy>=1.26"]
 
 [project.scripts]
-chat-memory = "chat_memory.server:main"
+keepsake = "keepsake.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/chat_memory"]
+packages = ["src/keepsake"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

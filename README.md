@@ -1,11 +1,11 @@
-# chat-memory
+# keepsake
 
 A small, local [MCP](https://modelcontextprotocol.io) server that gives AI chats a memory that
 lasts between sessions. It needs no cloud service, no GPU and no background service: just one
 SQLite file and Python.
 
 - **Local only.** Memories live in a single SQLite file on your machine
-  (default `~/.local/share/chat-memory/memory.db`, or `%LOCALAPPDATA%\chat-memory` on
+  (default `~/.local/share/keepsake/memory.db`, or `%LOCALAPPDATA%\keepsake` on
   Windows; readable only by you).
 - **Hybrid search.** Keyword search (SQLite FTS5), plus optional meaning-based search with a
   small CPU model (`all-MiniLM-L6-v2`, ONNX). "Where's my vegetable patch?" finds the allotment.
@@ -22,8 +22,11 @@ SQLite file and Python.
   reference numbers, UUIDs and hashes are indexed, so `match` can check a list of values from
   elsewhere and report exact hits only: `203.0.113.45` never matches `203.0.113.46`.
 
+*Renamed from `chat-memory` in 0.6. Existing databases, models, exports and
+`CHAT_MEMORY_*` settings are still found automatically; `KEEPSAKE_*` settings take priority.*
+
 The AI you're chatting with decides what is worth remembering, guided by the server's
-instructions (see `INSTRUCTIONS` in `src/chat_memory/server.py`). The server stores, searches
+instructions (see `INSTRUCTIONS` in `src/keepsake/server.py`). The server stores, searches
 and guards against duplicates. That split keeps it light enough for an ordinary laptop.
 
 ## Install
@@ -32,8 +35,8 @@ Requires Python 3.11+ and works on Linux, macOS and Windows. (Windows: see
 [the Windows section](#windows) for the commands.)
 
 ```bash
-git clone https://github.com/mav-rix/chat-memory.git
-cd chat-memory
+git clone https://github.com/mav-rix/keepsake.git
+cd keepsake
 python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
@@ -42,29 +45,29 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/pip install -e '.[semantic]'
-.venv/bin/chat-memory download-model   # ~90 MB, pinned revision, SHA-256 checked
+.venv/bin/keepsake download-model   # ~90 MB, pinned revision, SHA-256 checked
 ```
 
 **Privacy:** the model runs entirely on your CPU. The only network access is
 `download-model` fetching two files (an HTTPS download from huggingface.co; nothing is sent
 except the request itself). Your memories and searches never leave the machine, and ONNX
 Runtime's optional telemetry is switched off. On a locked-down network, download the two
-files another way and set `CHAT_MEMORY_MODEL_DIR` (see below).
+files another way and set `KEEPSAKE_MODEL_DIR` (see below).
 
-The model is stored in `~/.cache/chat-memory/models/` (Windows: `%LOCALAPPDATA%\chat-memory\models`) and loads on the first search, so a
+The model is stored in `~/.cache/keepsake/models/` (Windows: `%LOCALAPPDATA%\keepsake\models`) and loads on the first search, so a
 session that never searches stays at about 75 MB of RAM (about 275 MB once loaded). Existing
 memories are embedded automatically the first time they're needed, or run
-`chat-memory reindex`. Set `CHAT_MEMORY_SEMANTIC=0` to switch it off.
+`keepsake reindex`. Set `KEEPSAKE_SEMANTIC=0` to switch it off.
 
 ### Claude Code
 
 ```bash
-claude mcp add --scope user chat-memory -- "$PWD/.venv/bin/chat-memory"
+claude mcp add --scope user keepsake -- "$PWD/.venv/bin/keepsake"
 ```
 
 ### GitHub Copilot (VS Code, Copilot CLI)
 
-chat-memory works with any model Copilot offers (OpenAI, Anthropic, Google...): MCP is
+keepsake works with any model Copilot offers (OpenAI, Anthropic, Google...): MCP is
 model-neutral. Add it to Copilot's MCP config, `~/.copilot/mcp-config.json`
 (Windows: `%USERPROFILE%\.copilot\mcp-config.json`), which VS Code's Copilot agent and the
 Copilot CLI both read:
@@ -72,11 +75,11 @@ Copilot CLI both read:
 ```json
 {
   "mcpServers": {
-    "chat-memory": {
+    "keepsake": {
       "type": "stdio",
-      "command": "C:\\Users\\you\\chat-memory\\.venv\\Scripts\\chat-memory.exe",
+      "command": "C:\\Users\\you\\keepsake\\.venv\\Scripts\\keepsake.exe",
       "args": [],
-      "env": { "CHAT_MEMORY_MODE": "work" },
+      "env": { "KEEPSAKE_MODE": "work" },
       "tools": ["*"]
     }
   }
@@ -85,12 +88,12 @@ Copilot CLI both read:
 
 (Older VS Code setups use **MCP: Open User Configuration**, with the same entry under a
 `"servers"` key instead of `"mcpServers"`.) Then, in Copilot Chat, check the tools list shows
-chat-memory.
+keepsake.
 
 - **Business/Enterprise seats:** an organisation policy, *MCP servers in Copilot*, controls
   whether MCP servers can be used at all, and is off by default on some plans. Ask your admin.
 - **Instructions:** VS Code passes the server's instructions to the model. If a model still
-  doesn't save or recall when it should, run `chat-memory instructions --mode work` and paste
+  doesn't save or recall when it should, run `keepsake instructions --mode work` and paste
   the output into your Copilot custom instructions.
 - **Models differ:** how readily a model calls `remember` or `match` varies between models;
   asking directly ("check these against my cases", "log this case") always works.
@@ -104,14 +107,14 @@ Add to the client's MCP config (adjust the path):
 ```json
 {
   "mcpServers": {
-    "chat-memory": {
-      "command": "/path/to/chat-memory/.venv/bin/chat-memory"
+    "keepsake": {
+      "command": "/path/to/keepsake/.venv/bin/keepsake"
     }
   }
 }
 ```
 
-Set `CHAT_MEMORY_DB` to store the database somewhere else (see `.env.example`).
+Set `KEEPSAKE_DB` to store the database somewhere else (see `.env.example`).
 
 ### Windows
 
@@ -119,23 +122,23 @@ In PowerShell. Check `py --version` shows 3.11 or newer first (otherwise
 `winget install Python.Python.3.12`).
 
 ```powershell
-git clone https://github.com/mav-rix/chat-memory.git
-cd chat-memory
+git clone https://github.com/mav-rix/keepsake.git
+cd keepsake
 py -3 -m venv .venv
 .venv\Scripts\pip install -e ".[semantic]"        # or just -e . for keyword-only search
-.venv\Scripts\chat-memory download-model         # optional, ~90 MB
-claude mcp add --scope user chat-memory -- "$PWD\.venv\Scripts\chat-memory.exe"
-# work mode: add  -e CHAT_MEMORY_MODE=work  after "--scope user chat-memory"
-claude mcp list                                   # should show chat-memory: Connected
+.venv\Scripts\keepsake download-model         # optional, ~90 MB
+claude mcp add --scope user keepsake -- "$PWD\.venv\Scripts\keepsake.exe"
+# work mode: add  -e KEEPSAKE_MODE=work  after "--scope user keepsake"
+claude mcp list                                   # should show keepsake: Connected
 ```
 
-- **Where things live:** the database is `%LOCALAPPDATA%\chat-memory\memory.db` and the model
-  is under `%LOCALAPPDATA%\chat-memory\models`. They're protected by your Windows user
+- **Where things live:** the database is `%LOCALAPPDATA%\keepsake\memory.db` and the model
+  is under `%LOCALAPPDATA%\keepsake\models`. They're protected by your Windows user
   account's folder permissions (the Linux/macOS "owner only" file mode doesn't apply).
 - **Claude Desktop:** in its JSON config, double the backslashes:
-  `"command": "C:\\Users\\you\\chat-memory\\.venv\\Scripts\\chat-memory.exe"`.
+  `"command": "C:\\Users\\you\\keepsake\\.venv\\Scripts\\keepsake.exe"`.
 - **Don't move the folder** after registering it; Claude Code runs the server from there.
-  If you do, run `claude mcp remove chat-memory --scope user` and add it again.
+  If you do, run `claude mcp remove keepsake --scope user` and add it again.
 - **Keep the database out of OneDrive/Dropbox.** Syncing a live SQLite file can corrupt it.
   Use `export`/`import` to copy memories between machines.
 
@@ -146,7 +149,7 @@ claude mcp list                                   # should show chat-memory: Con
 - **Model download:** set `HTTPS_PROXY` if needed. Python uses the Windows certificate store,
   so company TLS inspection usually works. If huggingface.co is blocked, everything still
   works with keyword search; or download `onnx/model.onnx` and `tokenizer.json` from the pinned
-  revision another way, put them in one folder and point `CHAT_MEMORY_MODEL_DIR` at it.
+  revision another way, put them in one folder and point `KEEPSAKE_MODEL_DIR` at it.
 - **Managed Claude Code:** your IT team may only allow approved MCP servers. If
   `claude mcp list` doesn't show it, that's likely why. Check that keeping work chat memories
   in a local file is allowed.
@@ -178,7 +181,7 @@ For investigation work (fraud, disputes, support cases), where you need to check
 other parties against what you've seen before, run the server in work mode:
 
 ```bash
-claude mcp add --scope user chat-memory -e CHAT_MEMORY_MODE=work -- "$PWD/.venv/bin/chat-memory"
+claude mcp add --scope user keepsake -e KEEPSAKE_MODE=work -- "$PWD/.venv/bin/keepsake"
 ```
 
 Work mode changes only what the AI is asked to save: customer names, emails, phone numbers,
@@ -214,8 +217,8 @@ In a chat, give the AI the values and it calls `match`. From the command line, a
 CSV file works; every cell is checked:
 
 ```bash
-chat-memory match partner-report.csv          # identifiers only
-chat-memory match partner-report.csv --text   # also names and other plain cells
+keepsake match partner-report.csv          # identifiers only
+keepsake match partner-report.csv --text   # also names and other plain cells
 ```
 
 ```
@@ -225,18 +228,18 @@ not found  ip      203.0.113.46
 ```
 
 **Before using this for real case data,** check it fits your organisation's rules: card
-numbers and customer details will sit in a local SQLite file (not encrypted by chat-memory, so
+numbers and customer details will sit in a local SQLite file (not encrypted by keepsake, so
 rely on disk encryption such as BitLocker or FileVault), and recalled memories are sent to the
 AI as part of the conversation. Keep work and personal memories in separate databases.
 
 ## Backups, moving machines, tidying up
 
 ```bash
-chat-memory export ~/memory-backup.jsonl     # readable only by you; warns if inside a git repo
-chat-memory import ~/memory-backup.jsonl --dry-run
-chat-memory import ~/memory-backup.jsonl
-chat-memory import ~/.claude/projects/<project>/memory   # bring in Claude Code's memory files
-chat-memory import other-tool.db --dry-run                # another tool's SQLite memory database
+keepsake export ~/memory-backup.jsonl     # readable only by you; warns if inside a git repo
+keepsake import ~/memory-backup.jsonl --dry-run
+keepsake import ~/memory-backup.jsonl
+keepsake import ~/.claude/projects/<project>/memory   # bring in Claude Code's memory files
+keepsake import other-tool.db --dry-run                # another tool's SQLite memory database
 ```
 
 ### Moving from another SQLite-based memory tool
@@ -246,19 +249,19 @@ tables, columns and row counts, and which columns it would use. It never prints 
 contents, so its output is safe to share with whoever is helping you migrate:
 
 ```bash
-chat-memory inspect old-memory.db
+keepsake inspect old-memory.db
 #   memories (1520 rows)  ← suggested
 #     id INTEGER, content TEXT, tags TEXT, memory_type TEXT, created_at REAL, ...
 #   Suggested: --table memories --map content=content --map kind=memory_type ...
-chat-memory import old-memory.db --dry-run
-chat-memory import old-memory.db                          # add --kind case for case records
-chat-memory import old-memory.db --table kb --map content=note_text --map title=heading
+keepsake import old-memory.db --dry-run
+keepsake import old-memory.db                          # add --kind case for case records
+keepsake import old-memory.db --table kb --map content=note_text --map title=heading
 ```
 
 Fields you can map: `content` (required), `title` (else the first line of the content),
 `kind`, `tags` (JSON list or comma-separated), `topic_key`, `project`, `created_at` and
 `updated_at` (ISO text, or Unix seconds/milliseconds), and `deleted_at` (rows with a value are
-skipped). A type that isn't a chat-memory kind is kept as a `type:<name>` tag; every imported
+skipped). A type that isn't a keepsake kind is kept as a `type:<name>` tag; every imported
 memory is tagged `imported`. The old database is opened read-only and never changed; close
 the old tool first (or import a copy). Records go through the same checks as any save, so
 card expiry dates, PINs and security codes are removed and credentials are refused. Importing
@@ -270,10 +273,10 @@ duplicates are skipped, a `topic_key` that already exists keeps whichever versio
 (the other goes into history), superseded links are kept, and every record passes the same
 secret filter as `remember`.
 
-`chat-memory review` lists pairs that look like the same fact (cosine ≥ 0.80) or a changed fact
+`keepsake review` lists pairs that look like the same fact (cosine ≥ 0.80) or a changed fact
 (≥ 0.60), each with a suggested `supersede`, plus stale, repeated, superseded and forgotten
 memories. In a chat, ask the AI to tidy up your memory; it calls `review` and asks before
-changing anything. `chat-memory purge` permanently deletes memories forgotten more than 30
+changing anything. `keepsake purge` permanently deletes memories forgotten more than 30
 days ago (it asks first).
 
 ## How duplicates are judged
@@ -296,18 +299,18 @@ pinned memories. On a 2021 laptop CPU, 10,000 memories search in about 45 ms.
 ## Command line
 
 ```bash
-chat-memory                  # run the MCP server (stdio)
-chat-memory download-model   # fetch the embedding model
-chat-memory reindex          # embed memories that lack embeddings
-chat-memory stats            # counts and search mode
-chat-memory usage            # estimated tokens used by memory tool calls
-chat-memory review           # what needs tidying
-chat-memory match FILE       # exact hits for identifiers in a text/CSV file (--text for names)
-chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
-chat-memory import PATH      # merge an export, a Claude Code memory folder or a SQLite db (--dry-run)
-chat-memory inspect DB       # another tool's tables/columns and the suggested mapping (no content)
-chat-memory instructions     # the AI instructions, for clients' custom-instructions settings
-chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
+keepsake                  # run the MCP server (stdio)
+keepsake download-model   # fetch the embedding model
+keepsake reindex          # embed memories that lack embeddings
+keepsake stats            # counts and search mode
+keepsake usage            # estimated tokens used by memory tool calls
+keepsake review           # what needs tidying
+keepsake match FILE       # exact hits for identifiers in a text/CSV file (--text for names)
+keepsake export [FILE]    # back up as JSON Lines (stdout if no file)
+keepsake import PATH      # merge an export, a Claude Code memory folder or a SQLite db (--dry-run)
+keepsake inspect DB       # another tool's tables/columns and the suggested mapping (no content)
+keepsake instructions     # the AI instructions, for clients' custom-instructions settings
+keepsake purge            # permanently delete long-forgotten memories (--days, --yes)
 ```
 
 ## Token use
@@ -318,7 +321,7 @@ best hits (up to 3, within 8,000 characters), and the instructions ask for a sin
 only when past context could matter, not a `get_profile` at every session start. In tests
 with Claude Code this cut tokens on memory-backed questions by roughly 45%, and added
 nothing measurable to questions that need no memory (Claude Code loads MCP tool definitions
-on demand). `chat-memory usage` shows what the tools have returned; it logs only tool names
+on demand). `keepsake usage` shows what the tools have returned; it logs only tool names
 and sizes, never content.
 
 ## Development

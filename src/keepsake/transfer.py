@@ -1,7 +1,7 @@
 """Export and import.
 
 Export format: JSON Lines. The first line is a header
-``{"format": "chat-memory", "version": 1, "exported_at": ...}``; each following line is one
+``{"format": "keepsake", "version": 1, "exported_at": ...}``; each following line is one
 memory with its version history. Embeddings are not exported (they're rebuilt on import).
 
 Import also reads a Claude Code memory folder (Markdown files with front matter) and other
@@ -21,7 +21,8 @@ from typing import Any
 
 from .store import Store, StoreError, _now
 
-FORMAT = "chat-memory"
+FORMAT = "keepsake"
+_FORMATS = (FORMAT, "chat-memory")  # exports made before the rename still import
 FORMAT_VERSION = 1
 
 
@@ -56,10 +57,10 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
             header = json.loads(first)
         except json.JSONDecodeError:
             header = None
-        if not isinstance(header, dict) or header.get("format") != FORMAT:
-            raise StoreError(f"{path} is not a chat-memory export (missing header line).")
+        if not isinstance(header, dict) or header.get("format") not in _FORMATS:
+            raise StoreError(f"{path} is not a keepsake export (missing header line).")
         if int(header.get("version", 0)) > FORMAT_VERSION:
-            raise StoreError(f"{path} was written by a newer chat-memory; upgrade first.")
+            raise StoreError(f"{path} was written by a newer keepsake; upgrade first.")
         for n, line in enumerate(f, 2):
             if not line.strip():
                 continue
@@ -164,7 +165,7 @@ def _tables(db) -> list[dict[str, Any]]:
 
 
 def guess_mapping(columns: list[tuple[str, str]]) -> dict[str, str]:
-    """Map chat-memory fields to the columns most likely to hold them."""
+    """Map keepsake fields to the columns most likely to hold them."""
     names = {c.lower(): c for c, _ in columns}
     mapping: dict[str, str] = {}
     for field, options in FIELD_GUESSES.items():
@@ -231,7 +232,7 @@ def read_sqlite(
         if chosen is None:
             raise StoreError(
                 f"No table '{table}' in {path}." if table
-                else f"Couldn't find a table of memories in {path}; run `chat-memory inspect` and pass --table."
+                else f"Couldn't find a table of memories in {path}; run `keepsake inspect` and pass --table."
             )
         cols = {c for c, _ in chosen["columns"]}
         m = {**guess_mapping(chosen["columns"]), **(mapping or {})}

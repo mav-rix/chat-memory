@@ -9,9 +9,9 @@ import stat
 
 import pytest
 
-from chat_memory import transfer
-from chat_memory.server import main
-from chat_memory.store import Store, StoreError
+from keepsake import transfer
+from keepsake.server import main
+from keepsake.store import Store, StoreError
 
 from test_semantic import FakeEmbedder
 
@@ -140,9 +140,9 @@ def test_claude_code_folder_import(tmp_path, store):
 
 
 def test_export_file_is_private_and_cli_roundtrip(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
-    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
-    from chat_memory import server
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
 
     server.store.cache_clear()
     server.store().remember("Bins", "Recycling goes out on Tuesday night.")
@@ -152,7 +152,7 @@ def test_export_file_is_private_and_cli_roundtrip(tmp_path, monkeypatch, capsys)
         assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
 
     server.store.cache_clear()
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "b.db"))
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "b.db"))
     main(["import", str(out)])
     assert "1 new" in capsys.readouterr().out
     assert server.store().stats()["active"] == 1
@@ -215,9 +215,9 @@ def test_review_finds_near_duplicates_with_embeddings(tmp_path):
 
 
 def test_cli_review_prints(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
-    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
-    from chat_memory import server
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
 
     server.store.cache_clear()
     main(["review"])
@@ -227,9 +227,9 @@ def test_cli_review_prints(tmp_path, monkeypatch, capsys):
 
 # ── usage log ──────────────────────────────────────────────────────────────
 def test_tool_calls_are_logged_without_content(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
-    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
-    from chat_memory import server
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
 
     server.store.cache_clear()
     server.remember("Bins", "Recycling goes out on Tuesday night.")
@@ -243,3 +243,9 @@ def test_tool_calls_are_logged_without_content(tmp_path, monkeypatch):
     assert {t["tool"] for t in u["tools"]} == {"remember", "recall", "get_memory"}
     assert server.fixed_cost_chars() > 1000
     server.store.cache_clear()
+
+
+def test_exports_from_before_the_rename_import(tmp_path, store):
+    p = tmp_path / "old.jsonl"
+    p.write_text('{"format": "chat-memory", "version": 1}\n{"title": "Bins", "content": "Bins go out on Tuesday."}\n')
+    assert store.import_records(transfer.read_jsonl(p))["created"] == 1

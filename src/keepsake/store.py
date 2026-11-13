@@ -1,4 +1,4 @@
-"""SQLite storage for chat memory.
+"""SQLite storage for keepsake.
 
 One file, no server. Full-text search uses SQLite's built-in FTS5.
 
@@ -149,10 +149,17 @@ class StoreError(Exception):
     """A request the store refuses (bad input, secrets, unknown id)."""
 
 
+def setting(name: str, default: str = "") -> str:
+    """KEEPSAKE_<name>, falling back to the pre-rename CHAT_MEMORY_<name>."""
+    return os.environ.get(f"KEEPSAKE_{name}") or os.environ.get(f"CHAT_MEMORY_{name}") or default
+
+
 def default_db_path() -> Path:
-    if env := os.environ.get("CHAT_MEMORY_DB"):
+    if env := setting("DB"):
         return Path(env).expanduser()
-    return data_home() / "chat-memory" / "memory.db"
+    path = data_home() / "keepsake" / "memory.db"
+    legacy = data_home() / "chat-memory" / "memory.db"  # name before 0.6
+    return legacy if not path.exists() and legacy.exists() else path
 
 
 def data_home() -> Path:

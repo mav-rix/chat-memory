@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -12,7 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import __version__
 from .embed import load_embedder
-from .store import KINDS, Store, StoreError, default_db_path
+from .store import KINDS, Store, StoreError, default_db_path, setting
 
 # The instructions are the most important part of this server: they decide
 # what gets remembered. Keep them short, concrete and testable.
@@ -59,7 +58,7 @@ HOW TO WRITE A MEMORY: one fact per memory, self-contained, with absolute dates 
 Title = short label. Content = What / Why / Where / How to apply, as relevant.
 kind is one of: {", ".join(KINDS)}.
 For a subject that will evolve (a project's status, a device's setup), pass a stable topic_key
-such as "project/chat-memory" or "device/printer"; saving with the same key updates in place.
+such as "project/keepsake" or "device/printer"; saving with the same key updates in place.
 
 DUPLICATES AND CONFLICTS: remember checks for similar memories. If it answers needs_review,
 update the existing memory instead (or pass force=true if it is genuinely different). If it
@@ -73,8 +72,8 @@ each suggestion only after they agree.
 
 
 def mode() -> str:
-    """CHAT_MEMORY_MODE=work switches the save policy to case work; anything else is personal."""
-    return "work" if os.environ.get("CHAT_MEMORY_MODE", "").strip().lower() == "work" else "personal"
+    """KEEPSAKE_MODE=work switches the save policy to case work; anything else is personal."""
+    return "work" if setting("MODE").strip().lower() == "work" else "personal"
 
 
 def instructions(for_mode: str | None = None) -> str:
@@ -84,7 +83,7 @@ def instructions(for_mode: str | None = None) -> str:
 
 INSTRUCTIONS = instructions()
 
-mcp = MCPServer(name="chat-memory", version=__version__, instructions=INSTRUCTIONS)
+mcp = MCPServer(name="keepsake", version=__version__, instructions=INSTRUCTIONS)
 
 
 @functools.cache
@@ -245,7 +244,7 @@ def _print_review(r: dict[str, Any]) -> None:
         ("stale", "Not used for a long time"),
         ("repeated", "Saved repeatedly"),
         ("superseded", "Superseded (hidden from search)"),
-        ("forgotten", "Forgotten (removed for good by: chat-memory purge)"),
+        ("forgotten", "Forgotten (removed for good by: keepsake purge)"),
     ):
         if r[key]:
             print(f"{heading} ({len(r[key])}):")
@@ -263,7 +262,7 @@ def main(argv: list[str] | None = None) -> None:
 
     from . import transfer
 
-    p = argparse.ArgumentParser(prog="chat-memory", description="Local MCP memory server.")
+    p = argparse.ArgumentParser(prog="keepsake", description="Local MCP memory server.")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("serve", help="run the MCP server over stdio (the default)")
     sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
@@ -284,7 +283,7 @@ def main(argv: list[str] | None = None) -> None:
     im.add_argument("--kind", help="kind for every imported memory (e.g. case)")
     it = sub.add_parser("instructions", help="print the AI instructions, to paste into a client's custom "
                         "instructions if it ignores MCP server instructions")
-    it.add_argument("--mode", choices=["personal", "work"], help="default: CHAT_MEMORY_MODE")
+    it.add_argument("--mode", choices=["personal", "work"], help="default: KEEPSAKE_MODE")
     ins = sub.add_parser("inspect", help="show another SQLite memory db's tables and suggested mapping (no content)")
     ins.add_argument("path", type=Path)
     mt = sub.add_parser("match", help="check identifiers in a file (or - for stdin) for exact hits")
@@ -322,15 +321,15 @@ def _run(args, json, sys, transfer) -> None:
         try:
             path = download_model()
         except ImportError:
-            sys.exit("Install the semantic extra first: pip install 'chat-memory[semantic]'")
+            sys.exit("Install the semantic extra first: pip install 'keepsake[semantic]'")
         except Exception as e:  # network or checksum problems
             sys.exit(f"Download failed: {e}")
         print(f"Model ready in {path}. Semantic search turns on the next time the server starts.")
         if load_embedder() is None:
-            print("Note: onnxruntime/tokenizers/numpy are missing; install 'chat-memory[semantic]'.")
+            print("Note: onnxruntime/tokenizers/numpy are missing; install 'keepsake[semantic]'.")
     elif args.cmd == "reindex":
         if store().embedder is None:
-            sys.exit("Semantic search is not available (run: chat-memory download-model).")
+            sys.exit("Semantic search is not available (run: keepsake download-model).")
         print(f"Embedded {store().backfill_embeddings()} memories.")
     elif args.cmd == "stats":
         print(json.dumps({"database": str(default_db_path()), "mode": mode(), **store().stats()}, indent=2))
@@ -399,7 +398,7 @@ def _run(args, json, sys, transfer) -> None:
         if info["suggested_table"]:
             print(f"\nSuggested: --table {info['suggested_table']} " +
                   " ".join(f"--map {k}={v}" for k, v in info["suggested_mapping"].items()))
-            print("Check with: chat-memory import PATH --dry-run (add --table/--map to override).")
+            print("Check with: keepsake import PATH --dry-run (add --table/--map to override).")
             if "content" not in info["suggested_mapping"]:
                 print("No obvious text column: add --map content=COLUMN.")
         else:

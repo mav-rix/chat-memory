@@ -1,7 +1,7 @@
 """Semantic-search tests. Made-up data only.
 
 Tests marked ``real_model`` use all-MiniLM-L6-v2 and are skipped when it isn't installed
-(run ``chat-memory download-model``). The rest use a tiny deterministic fake embedder.
+(run ``keepsake download-model``). The rest use a tiny deterministic fake embedder.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import zlib
 import numpy as np
 import pytest
 
-from chat_memory.embed import load_embedder
-from chat_memory.store import Store
+from keepsake.embed import load_embedder
+from keepsake.store import Store
 
 REAL = load_embedder()
 real_model = pytest.mark.skipif(REAL is None, reason="embedding model not installed")

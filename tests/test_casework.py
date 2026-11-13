@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from chat_memory.identifiers import extract, redact_card_details
-from chat_memory.server import instructions, main
-from chat_memory.store import Store
+from keepsake.identifiers import extract, redact_card_details
+from keepsake.server import instructions, main
+from keepsake.store import Store
 
 TEST_CARD = "4111 1111 1111 1111"  # Visa test number
 GIFT_CARD = "6006491234567890123"  # 19 digits, not Luhn-valid, like many gift cards
@@ -172,9 +172,9 @@ def test_cli_instructions(capsys):
 
 
 def test_cli_match(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
-    monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")
-    from chat_memory import server
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
 
     server.store.cache_clear()
     server.store().remember("Case 10", "Order ORD-2026-555001 from 203.0.113.77 by Jane Example.")

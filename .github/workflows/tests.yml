@@ -28,10 +28,10 @@ jobs:
       - name: Command line smoke test
         shell: bash
         env:
-          CHAT_MEMORY_DB: ${{ runner.temp }}/smoke.db
+          KEEPSAKE_DB: ${{ runner.temp }}/smoke.db
         run: |
-          chat-memory stats
-          chat-memory review
-          chat-memory usage
-          chat-memory export "$RUNNER_TEMP/backup.jsonl"
-          chat-memory import "$RUNNER_TEMP/backup.jsonl" --dry-run
+          keepsake stats
+          keepsake review
+          keepsake usage
+          keepsake export "$RUNNER_TEMP/backup.jsonl"
+          keepsake import "$RUNNER_TEMP/backup.jsonl" --dry-run

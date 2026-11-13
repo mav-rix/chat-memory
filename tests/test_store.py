@@ -7,8 +7,8 @@ import stat
 
 import pytest
 
-from chat_memory.redact import find_secrets, strip_private
-from chat_memory.store import Store, StoreError, similarity
+from keepsake.redact import find_secrets, strip_private
+from keepsake.store import Store, StoreError, similarity
 
 
 @pytest.fixture
@@ -168,7 +168,7 @@ def test_similarity_basics():
 
 
 def test_recall_gives_full_text_for_top_hits(tmp_path):
-    from chat_memory.store import Store
+    from keepsake.store import Store
 
     s = Store(tmp_path / "m.db")
     long = "The greenhouse heater runs on a timer. " * 20
@@ -179,12 +179,31 @@ def test_recall_gives_full_text_for_top_hits(tmp_path):
 
 
 def test_windows_paths_use_localappdata(monkeypatch, tmp_path):
-    from chat_memory import embed, store as store_mod
+    from keepsake import embed, store as store_mod
 
-    monkeypatch.delenv("CHAT_MEMORY_DB", raising=False)
-    monkeypatch.delenv("CHAT_MEMORY_MODEL_DIR", raising=False)
+    monkeypatch.delenv("KEEPSAKE_DB", raising=False)
+    monkeypatch.delenv("KEEPSAKE_MODEL_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(store_mod, "WINDOWS", True)
     monkeypatch.setattr(embed, "WINDOWS", True)
-    assert store_mod.default_db_path() == tmp_path / "chat-memory" / "memory.db"
-    assert embed.model_dir().is_relative_to(tmp_path / "chat-memory" / "models")
+    assert store_mod.default_db_path() == tmp_path / "keepsake" / "memory.db"
+    assert embed.model_dir().is_relative_to(tmp_path / "keepsake" / "models")
+
+
+def test_names_from_before_the_rename_still_work(monkeypatch, tmp_path):
+    from keepsake import embed, store as store_mod
+
+    for v in ("KEEPSAKE_DB", "CHAT_MEMORY_DB", "KEEPSAKE_MODEL_DIR", "CHAT_MEMORY_MODEL_DIR"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "old-setting.db"))
+    assert store_mod.default_db_path() == tmp_path / "old-setting.db"
+    monkeypatch.delenv("CHAT_MEMORY_DB")
+    monkeypatch.setattr(store_mod, "WINDOWS", False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert store_mod.default_db_path() == tmp_path / "keepsake" / "memory.db"
+    (tmp_path / "chat-memory").mkdir()
+    (tmp_path / "chat-memory" / "memory.db").write_bytes(b"")
+    assert store_mod.default_db_path() == tmp_path / "chat-memory" / "memory.db"  # existing data found
+    monkeypatch.setattr(embed, "WINDOWS", False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    assert "keepsake" in embed.model_dir().parts

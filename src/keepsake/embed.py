@@ -1,7 +1,7 @@
 """Optional semantic embeddings: all-MiniLM-L6-v2 on CPU via ONNX Runtime.
 
-Install the extra (``pip install 'chat-memory[semantic]'``), then fetch the model once with
-``chat-memory download-model``. The model is never downloaded implicitly by the MCP server:
+Install the extra (``pip install 'keepsake[semantic]'``), then fetch the model once with
+``keepsake download-model``. The model is never downloaded implicitly by the MCP server:
 a 90 MB download in the middle of a tool call would time out and surprise people.
 
 Files come from a pinned Hugging Face revision and are checked against SHA-256 hashes.
@@ -32,17 +32,23 @@ MODEL_FILES = {
 
 
 def model_dir() -> Path:
-    if env := os.environ.get("CHAT_MEMORY_MODEL_DIR"):
+    from .store import setting
+
+    if env := setting("MODEL_DIR"):
         return Path(env).expanduser()
     if WINDOWS and os.environ.get("LOCALAPPDATA"):
         base = Path(os.environ["LOCALAPPDATA"])
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser()
-    return base / "chat-memory" / "models" / MODEL_NAME / MODEL_REVISION[:12]
+    path = base / "keepsake" / "models" / MODEL_NAME / MODEL_REVISION[:12]
+    legacy = base / "chat-memory" / "models" / MODEL_NAME / MODEL_REVISION[:12]  # name before 0.6
+    return legacy if not path.exists() and legacy.exists() else path
 
 
 def semantic_disabled() -> bool:
-    return os.environ.get("CHAT_MEMORY_SEMANTIC", "").strip().lower() in ("0", "false", "no", "off")
+    from .store import setting
+
+    return setting("SEMANTIC").strip().lower() in ("0", "false", "no", "off")
 
 
 def _sha256(path: Path) -> str:
