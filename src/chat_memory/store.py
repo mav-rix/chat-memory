@@ -25,12 +25,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from .identifiers import extract as extract_identifiers
+from .identifiers import redact_card_details
 from .redact import find_secrets, strip_private
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 WINDOWS = os.name == "nt"
 
-KINDS = ("fact", "preference", "project", "decision", "event", "person", "howto", "summary")
+KINDS = ("fact", "preference", "project", "decision", "event", "person", "howto", "summary", "case")
 
 # Word-overlap thresholds (Jaccard) for the near-duplicate check.
 DUPLICATE_THRESHOLD = 0.8  # at or above: probably the same memory, don't save without force
@@ -91,6 +93,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_topic
 CREATE INDEX IF NOT EXISTS idx_mem_hash    ON memories(normalized_hash);
 CREATE INDEX IF NOT EXISTS idx_mem_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_mem_updated ON memories(updated_at DESC);
+
+-- Identifiers (IPs, emails, card and order numbers...) in normalised form, for exact matching.
+CREATE TABLE IF NOT EXISTS identifiers (
+    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind      TEXT    NOT NULL,
+    value     TEXT    NOT NULL,
+    raw       TEXT    NOT NULL,
+    PRIMARY KEY (memory_id, kind, value)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_ident_value ON identifiers(kind, value);
 
 -- Usage log: which tool ran and how much text it returned. Never the content itself.
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -235,7 +247,10 @@ class Store:
         if cols and "embedding" not in cols:  # v1 → v2
             self.db.execute("ALTER TABLE memories ADD COLUMN embedding BLOB")
             self.db.execute("ALTER TABLE memories ADD COLUMN embedding_model TEXT")
+        old_version = self.db.execute("PRAGMA user_version").fetchone()[0]
         self.db.executescript(_SCHEMA)
+        if cols and old_version < 4:
+            self.reindex_identifiers()
         self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if new_file:
             os.chmod(self.path, 0o600)
@@ -344,8 +359,13 @@ class Store:
         top = np.argsort(-sims)[:k] if len(sims) <= k else np.argpartition(-sims, k)[:k]
         return {int(ids[i]): float(sims[i]) for i in top if sims[i] >= floor}
 
-    def _check_text(self, title: str, content: str) -> tuple[str, str]:
+    def _check_text(self, title: str, content: str) -> tuple[str, str, list[str]]:
+        """Clean text for storage: drop <private> parts and card expiry/PIN/security codes,
+        and refuse credentials. Returns (title, content, what was redacted)."""
         title, content = strip_private(title).strip(), strip_private(content).strip()
+        title, r1 = redact_card_details(title)
+        content, r2 = redact_card_details(content)
+        redacted = list(dict.fromkeys(r1 + r2))
         if not title or not content:
             raise StoreError("Both title and content are required.")
         if found := find_secrets(f"{title}\n{content}"):
@@ -353,7 +373,20 @@ class Store:
                 "Refused: this looks like it contains a secret (" + ", ".join(found) + "). "
                 "Never store credentials. Remove it, or wrap the sensitive part in <private>…</private>."
             )
-        return title, content
+        return title, content, redacted
+
+    def _index(self, memory_id: int, title: str, content: str) -> None:
+        self.db.execute("DELETE FROM identifiers WHERE memory_id = ?", (memory_id,))
+        self.db.executemany(
+            "INSERT OR IGNORE INTO identifiers(memory_id, kind, value, raw) VALUES (?,?,?,?)",
+            [(memory_id, k, v, raw) for k, v, raw in extract_identifiers(f"{title}\n{content}")],
+        )
+
+    def reindex_identifiers(self) -> int:
+        rows = self.db.execute("SELECT id, title, content FROM memories").fetchall()
+        for r in rows:
+            self._index(r["id"], r["title"], r["content"])
+        return len(rows)
 
     def _save_version(self, row: sqlite3.Row) -> None:
         self.db.execute(
@@ -413,7 +446,12 @@ class Store:
         project: str | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        title, content = self._check_text(title, content)
+        title, content, redacted = self._check_text(title, content)
+        note = (
+            {"redacted": redacted, "note": "Removed before saving: " + ", ".join(redacted) + "."}
+            if redacted
+            else {}
+        )
         kind = kind.strip().lower() or "fact"
         if kind not in KINDS:
             raise StoreError(f"Unknown kind '{kind}'. Use one of: {', '.join(KINDS)}.")
@@ -432,7 +470,7 @@ class Store:
                         "UPDATE memories SET duplicate_count = duplicate_count + 1, updated_at = ? WHERE id = ?",
                         (now, row["id"]),
                     )
-                    return {"action": "unchanged", "id": row["id"], "message": "Topic already says exactly this."}
+                    return {"action": "unchanged", "id": row["id"], "message": "Topic already says exactly this.", **note}
                 emb, emb_model = self._embedding_cols(self._embed(content))
                 self.db.execute("BEGIN")
                 self._save_version(row)
@@ -442,12 +480,14 @@ class Store:
                        embedding=?, embedding_model=? WHERE id=?""",
                     (title, content, kind, tags_s or row["tags"], project, h, now, emb, emb_model, row["id"]),
                 )
+                self._index(row["id"], title, content)
                 self.db.execute("COMMIT")
                 self._writes += 1
                 return {
                     "action": "updated",
                     "id": row["id"],
                     "message": f"Updated topic '{topic_key}' (previous version kept).",
+                    **note,
                 }
 
         # 2. Exact duplicate of an active memory → just count it.
@@ -459,7 +499,7 @@ class Store:
                 "UPDATE memories SET duplicate_count = duplicate_count + 1, updated_at = ? WHERE id = ?",
                 (now, row["id"]),
             )
-            return {"action": "duplicate", "id": row["id"], "message": "Already remembered; nothing new saved."}
+            return {"action": "duplicate", "id": row["id"], "message": "Already remembered; nothing new saved.", **note}
 
         # 3. Near-duplicates → let the AI decide unless it already has (force).
         vec = self._embed(content)
@@ -473,6 +513,7 @@ class Store:
                     "Not saved: a very similar memory exists. Update it with update_memory, "
                     "or call remember again with force=true if this is genuinely different."
                 ),
+                **note,
             }
 
         cur = self.db.execute(
@@ -481,8 +522,9 @@ class Store:
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (topic_key, kind, title, content, tags_s, project, h, now, now, *self._embedding_cols(vec)),
         )
+        self._index(cur.lastrowid, title, content)
         self._writes += 1
-        result: dict[str, Any] = {"action": "created", "id": cur.lastrowid}
+        result: dict[str, Any] = {"action": "created", "id": cur.lastrowid, **note}
         if similar:
             result["similar"] = similar
             result["message"] = (
@@ -503,7 +545,7 @@ class Store:
         row = self._row(memory_id)
         if row["deleted_at"]:
             raise StoreError(f"Memory {memory_id} was forgotten; save a new one instead.")
-        new_title, new_content = self._check_text(title or row["title"], content or row["content"])
+        new_title, new_content, redacted = self._check_text(title or row["title"], content or row["content"])
         if kind is not None and kind.strip().lower() not in KINDS:
             raise StoreError(f"Unknown kind '{kind}'. Use one of: {', '.join(KINDS)}.")
         text_changed = (new_title, new_content) != (row["title"], row["content"])
@@ -534,8 +576,13 @@ class Store:
                 memory_id,
             ),
         )
+        if text_changed:
+            self._index(memory_id, new_title, new_content)
         self.db.execute("COMMIT")
-        return {"action": "updated", "id": memory_id}
+        result: dict[str, Any] = {"action": "updated", "id": memory_id}
+        if redacted:
+            result["redacted"] = redacted
+        return result
 
     def supersede(self, old_id: int, new_id: int) -> dict[str, Any]:
         if old_id == new_id:
@@ -629,6 +676,7 @@ class Store:
         """
         report: dict[str, Any] = {
             "created": 0, "updated": 0, "duplicate": 0, "older": 0, "refused": [], "history_dropped": 0,
+            "redacted": 0,
         }
         idmap: dict[Any, int] = {}
         links: list[tuple[int, Any]] = []
@@ -637,7 +685,10 @@ class Store:
             for n, rec in enumerate(records, 1):
                 source = str(rec.get("_source") or f"record {n}")
                 try:
-                    title, content = self._check_text(str(rec.get("title") or ""), str(rec.get("content") or ""))
+                    title, content, redacted = self._check_text(
+                        str(rec.get("title") or ""), str(rec.get("content") or "")
+                    )
+                    report["redacted"] += bool(redacted)
                 except StoreError as e:
                     report["refused"].append({"source": source, "reason": str(e).split(". ")[0] + "."})
                     continue
@@ -674,6 +725,7 @@ class Store:
                                 (title, content, kind, _clean_tags(rec.get("tags")) or row["tags"], h, updated,
                                  row["id"]),
                             )
+                            self._index(row["id"], title, content)
                             report["updated"] += 1
                         else:
                             report["older"] += 1
@@ -682,7 +734,7 @@ class Store:
                 history = []
                 for v in rec.get("history") or []:
                     try:
-                        vt, vc = self._check_text(str(v.get("title") or ""), str(v.get("content") or ""))
+                        vt, vc, _ = self._check_text(str(v.get("title") or ""), str(v.get("content") or ""))
                         history.append((int(v["version"]), vt, vc, _iso(v.get("created_at"), created)))
                     except (StoreError, KeyError, TypeError, ValueError):
                         report["history_dropped"] += 1
@@ -700,6 +752,7 @@ class Store:
                     ),
                 )
                 new_id = cur.lastrowid
+                self._index(new_id, title, content)
                 idmap[rec.get("id")] = new_id
                 self.db.executemany(
                     "INSERT OR IGNORE INTO memory_versions(memory_id, version, title, content, created_at) "
@@ -926,6 +979,80 @@ class Store:
             "forgotten": q(
                 "SELECT * FROM memories WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?"
             ),
+        }
+
+    # ── exact matching ─────────────────────────────────────────────────────
+    def match(self, items: list[str], limit: int = 10) -> list[dict[str, Any]]:
+        """Exact lookups, for checking data received from elsewhere.
+
+        Identifiers in each item (IPs, emails, card/gift card, phone, order and reference
+        numbers, UUIDs, hashes) are compared in normalised form against the index. An item with
+        no identifier (a name, say) is matched as a whole phrase, case-insensitively, on word
+        boundaries. Never fuzzy: 203.0.113.45 does not match 203.0.113.46. Forgotten memories
+        are excluded; superseded ones are included and marked, since old records still count.
+        """
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            item = str(item).strip()
+            if not item:
+                continue
+            found = extract_identifiers(item)
+            if found:
+                for kind, value, raw in found:
+                    if (kind, value) in seen:
+                        continue
+                    seen.add((kind, value))
+                    rows = self.db.execute(
+                        """SELECT m.*, i.raw AS hit FROM identifiers i JOIN memories m ON m.id = i.memory_id
+                           WHERE i.kind = ? AND i.value = ? AND m.deleted_at IS NULL
+                           ORDER BY m.updated_at DESC LIMIT ?""",
+                        (kind, value, limit),
+                    ).fetchall()
+                    out.append(self._match_result(raw, kind, rows))
+            elif len(item) >= 3 and ("text", item.lower()) not in seen:
+                seen.add(("text", item.lower()))
+                pattern = re.compile(r"(?<!\w)" + re.escape(item) + r"(?!\w)", re.IGNORECASE)
+                rows = [
+                    r
+                    for r in self.db.execute(
+                        """SELECT m.*, NULL AS hit FROM memories m WHERE m.deleted_at IS NULL
+                           AND (instr(lower(m.content), lower(?)) OR instr(lower(m.title), lower(?)))
+                           ORDER BY m.updated_at DESC""",
+                        (item, item),
+                    )
+                    if pattern.search(r["title"]) or pattern.search(r["content"])
+                ][:limit]
+                out.append(self._match_result(item, "text", rows))
+        return out
+
+    @staticmethod
+    def _match_result(query: str, kind: str, rows: list[sqlite3.Row]) -> dict[str, Any]:
+        def snippet(r: sqlite3.Row) -> str:
+            text, needle = r["content"], (r["hit"] or query)
+            i = text.lower().find(needle.lower())
+            if i < 0:
+                return text[:160]
+            start = max(0, i - 60)
+            return ("…" if start else "") + text[start : i + len(needle) + 60] + ("…" if i + len(needle) + 60 < len(text) else "")
+
+        return {
+            "query": query,
+            "kind": kind,
+            "found": bool(rows),
+            "memories": [
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "kind": r["kind"],
+                    "topic_key": r["topic_key"],
+                    "updated_at": r["updated_at"],
+                    "superseded": r["superseded_by"] is not None,
+                    "as_written": r["hit"],
+                    "snippet": snippet(r),
+                }
+                for r in rows
+            ],
         }
 
     # ── usage log ──────────────────────────────────────────────────────────

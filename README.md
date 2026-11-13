@@ -15,8 +15,12 @@ SQLite file and Python.
 - **Nothing silently lost.** Out-of-date memories are *superseded* (hidden but kept), and
   `forget` is a soft delete.
 - **Secrets refused.** Anything that looks like a token, key, password or credential-bearing
-  URL is rejected before it reaches disk. Wrap sensitive parts in `<private>…</private>` to
-  have them redacted.
+  URL is rejected before it reaches disk. Card expiry dates, PINs and security codes are
+  removed automatically. Wrap other sensitive parts in `<private>…</private>` to have them
+  redacted.
+- **Exact matching.** IPs, emails, card and gift card numbers, phone numbers, order and
+  reference numbers, UUIDs and hashes are indexed, so `match` can check a list of values from
+  elsewhere and report exact hits only: `203.0.113.45` never matches `203.0.113.46`.
 
 The AI you're chatting with decides what is worth remembering, guided by the server's
 instructions (see `INSTRUCTIONS` in `src/chat_memory/server.py`). The server stores, searches
@@ -80,6 +84,7 @@ py -3 -m venv .venv
 .venv\Scripts\pip install -e ".[semantic]"        # or just -e . for keyword-only search
 .venv\Scripts\chat-memory download-model         # optional, ~90 MB
 claude mcp add --scope user chat-memory -- "$PWD\.venv\Scripts\chat-memory.exe"
+# work mode: add  -e CHAT_MEMORY_MODE=work  after "--scope user chat-memory"
 claude mcp list                                   # should show chat-memory: Connected
 ```
 
@@ -117,6 +122,7 @@ claude mcp list                                   # should show chat-memory: Con
 | `supersede` | Mark an old memory as replaced by a newer one |
 | `forget` | Soft-delete a memory |
 | `restore` | Bring back a forgotten or superseded memory |
+| `match` | Exact lookup of identifiers or names (e.g. data received from another party) |
 | `list_recent` | Latest saved or updated memories |
 | `review` | Near-duplicates and possible conflicts (with suggestions), plus stale, superseded, repeated and forgotten memories |
 
@@ -124,6 +130,63 @@ claude mcp list                                   # should show chat-memory: Con
 
 The database is never inside the repository. `.gitignore` blocks database files and
 `.jsonl` exports anyway, as a second line of defence.
+
+## Work mode: case work and exact matching
+
+For investigation work (fraud, disputes, support cases), where you need to check data from
+other parties against what you've seen before, run the server in work mode:
+
+```bash
+claude mcp add --scope user chat-memory -e CHAT_MEMORY_MODE=work -- "$PWD/.venv/bin/chat-memory"
+```
+
+Work mode changes only what the AI is asked to save: customer names, emails, phone numbers,
+IP addresses, order IDs, transaction references, device IDs and card or gift card numbers are
+saved in full (matching depends on exact values), one evolving record per case
+(`kind="case"`, `topic_key="case/<id>"`). In every mode:
+
+- **Card expiry dates, PINs and security codes (CVV/CVC) are removed** before saving and
+  replaced with `[REDACTED]`; the response says what was removed. Card and gift card numbers
+  are kept. Labelled values are caught (`exp 12/27`, `PIN: 4821`, `CVV 123`), as is an
+  unlabelled `MM/YY` straight after a card number.
+- **Credentials are refused**, as always.
+
+### How matching works
+
+When a memory is saved, the identifiers in it are indexed in a normalised form, so different
+ways of writing the same value match:
+
+| Kind | Examples that match each other |
+|---|---|
+| IP (v4/v6) | `2001:DB8::1` = `2001:db8:0:0:0:0:0:1` |
+| Email | `Jane.Example@Example.com` = `jane.example@example.com` |
+| Card / gift card (12–19 digits) | `4111 1111 1111 1111` = `4111-1111-1111-1111` = `4111111111111111` |
+| Phone (compared on the last 9 digits) | `+44 7700 900123` = `07700 900123` |
+| Order / reference (letters and digits) | `ORD-2026-118842` = `ord2026118842` = `#ORD_2026_118842` |
+| Number (6–11 digits), UUID, hash (32+ hex) | exact, case-insensitive |
+
+Anything else, such as a customer name, is matched as a whole phrase, ignoring case
+(`Jane Example` matches; `Jan` doesn't match `Jane`). Superseded memories are included and
+marked, because old records still count as evidence; forgotten ones are not.
+
+In a chat, give the AI the values and it calls `match`. From the command line, any text or
+CSV file works; every cell is checked:
+
+```bash
+chat-memory match partner-report.csv          # identifiers only
+chat-memory match partner-report.csv --text   # also names and other plain cells
+```
+
+```
+FOUND      ref     ORD-2026-118843  →  [12] Fraud case FR-1042
+not found  ip      203.0.113.46
+1 of 2 values found (exact matches only).
+```
+
+**Before using this for real case data,** check it fits your organisation's rules: card
+numbers and customer details will sit in a local SQLite file (not encrypted by chat-memory, so
+rely on disk encryption such as BitLocker or FileVault), and recalled memories are sent to the
+AI as part of the conversation. Keep work and personal memories in separate databases.
 
 ## Backups, moving machines, tidying up
 
@@ -172,6 +235,7 @@ chat-memory reindex          # embed memories that lack embeddings
 chat-memory stats            # counts and search mode
 chat-memory usage            # estimated tokens used by memory tool calls
 chat-memory review           # what needs tidying
+chat-memory match FILE       # exact hits for identifiers in a text/CSV file (--text for names)
 chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
 chat-memory import PATH      # merge an export or a Claude Code memory folder (--dry-run)
 chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
@@ -204,6 +268,7 @@ The pre-commit hook needs [gitleaks](https://github.com/gitleaks/gitleaks) on yo
 2. ~~Optional meaning-based search, mixed with keyword scores~~ (0.2)
 3. ~~Export and import, near-duplicate and conflict review, restore~~ (0.3)
 4. ~~Usage log, fewer round trips~~ (0.4)
+5. ~~Work mode, card-detail redaction, exact identifier matching~~ (0.5)
 
 ## Credits
 
