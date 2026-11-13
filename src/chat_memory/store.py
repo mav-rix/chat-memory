@@ -19,6 +19,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,10 @@ SEM_RELATED = 0.45
 SEM_RECALL_FLOOR = 0.20
 SEMANTIC_WEIGHT, KEYWORD_WEIGHT = 0.7, 0.3
 PINNED_BONUS = 0.05
+# review(): pairs at or above this cosine are listed as possible conflicts (changed facts
+# scored 0.61-0.74 in calibration); keyword-only mode uses word overlap instead.
+REVIEW_COSINE = 0.60
+REVIEW_JACCARD = 0.50
 
 
 class EmbedderLike(Protocol):
@@ -157,6 +162,26 @@ def _fts_query(text: str, max_terms: int = 16) -> str | None:
         if len(terms) >= max_terms:
             break
     return " OR ".join(f'"{t}"' for t in terms) if terms else None
+
+
+def _iso(value: Any, default: str | None) -> str | None:
+    """A valid ISO timestamp (normalised to UTC) or ``default``."""
+    if not value:
+        return default
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return default
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _int(value: Any, default: int) -> int:
+    try:
+        return max(default, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _clean_tags(tags: list[str] | str | None) -> str:
@@ -513,14 +538,170 @@ class Store:
         self._writes += 1
         return {"action": "forgotten", "id": memory_id}
 
+    def purgeable(self, older_than_days: int = 30) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+        return self.db.execute(
+            "SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,)
+        ).fetchone()[0]
+
     def purge(self, older_than_days: int = 30) -> int:
         """Permanently remove memories forgotten more than ``older_than_days`` ago."""
         cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+        doomed = "SELECT id FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?"
+        # A memory replaced by one being purged stays hidden: it becomes forgotten itself
+        # (purged in a later run) rather than resurfacing as if it were current.
+        self.db.execute(
+            f"""UPDATE memories SET deleted_at = COALESCE(deleted_at, ?),
+                   delete_reason = COALESCE(delete_reason, 'its replacement was purged'),
+                   superseded_by = NULL WHERE superseded_by IN ({doomed})""",
+            (_now(), cutoff),
+        )
         cur = self.db.execute(
             "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,)
         )
         self._writes += 1
         return cur.rowcount
+
+    def restore(self, memory_id: int) -> dict[str, Any]:
+        """Undo forget or supersede: the memory becomes active again."""
+        row = self._row(memory_id)
+        if not row["deleted_at"] and not row["superseded_by"]:
+            raise StoreError(f"Memory {memory_id} is already active.")
+        if row["topic_key"] and row["deleted_at"]:
+            clash = self.db.execute(
+                "SELECT id FROM memories WHERE topic_key = ? AND deleted_at IS NULL AND id != ?",
+                (row["topic_key"], memory_id),
+            ).fetchone()
+            if clash:
+                raise StoreError(
+                    f"Memory {clash[0]} now holds topic '{row['topic_key']}'; update that one instead."
+                )
+        self.db.execute(
+            "UPDATE memories SET deleted_at = NULL, delete_reason = NULL, superseded_by = NULL, "
+            "updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
+        )
+        self._writes += 1
+        return {"action": "restored", "id": memory_id}
+
+    # ── export / import ────────────────────────────────────────────────────
+    def export_records(self, include_forgotten: bool = False) -> Iterator[dict[str, Any]]:
+        """Every memory (forgotten ones only on request) with its version history."""
+        where = "" if include_forgotten else "WHERE deleted_at IS NULL"
+        rows = self.db.execute(f"SELECT * FROM memories {where} ORDER BY id").fetchall()
+        for row in rows:
+            d = self._full(row)
+            d["history"] = [
+                dict(v)
+                for v in self.db.execute(
+                    "SELECT version, title, content, created_at FROM memory_versions "
+                    "WHERE memory_id = ? ORDER BY version",
+                    (row["id"],),
+                )
+            ]
+            yield d
+
+    def import_records(self, records: Iterable[dict[str, Any]], dry_run: bool = False) -> dict[str, Any]:
+        """Merge records (from ``export_records`` or another source) into this store.
+
+        Every record passes the same secret filter as ``remember``. Exact duplicates are
+        skipped; for a topic_key that already exists the newer version wins and the other is
+        kept in history. Superseded links are re-pointed to the new ids. All or nothing.
+        """
+        report: dict[str, Any] = {
+            "created": 0, "updated": 0, "duplicate": 0, "older": 0, "refused": [], "history_dropped": 0,
+        }
+        idmap: dict[Any, int] = {}
+        links: list[tuple[int, Any]] = []
+        self.db.execute("BEGIN")
+        try:
+            for n, rec in enumerate(records, 1):
+                source = str(rec.get("_source") or f"record {n}")
+                try:
+                    title, content = self._check_text(str(rec.get("title") or ""), str(rec.get("content") or ""))
+                except StoreError as e:
+                    report["refused"].append({"source": source, "reason": str(e).split(". ")[0] + "."})
+                    continue
+                kind = str(rec.get("kind") or "fact").strip().lower()
+                kind = kind if kind in KINDS else "fact"
+                tk = rec.get("topic_key")
+                tk = str(tk).strip().lower() if tk and str(tk).strip() else None
+                deleted = _iso(rec.get("deleted_at"), None)
+                created = _iso(rec.get("created_at"), _now())
+                updated = _iso(rec.get("updated_at"), created)
+                h = _normalized_hash(title, content)
+
+                same = self.db.execute(
+                    "SELECT id FROM memories WHERE normalized_hash = ? AND (deleted_at IS NULL) = ?",
+                    (h, int(deleted is None)),
+                ).fetchone()
+                if same:
+                    idmap[rec.get("id")] = same[0]
+                    report["duplicate"] += 1
+                    continue
+
+                if tk and deleted is None:
+                    row = self.db.execute(
+                        "SELECT * FROM memories WHERE topic_key = ? AND deleted_at IS NULL", (tk,)
+                    ).fetchone()
+                    if row:
+                        idmap[rec.get("id")] = row["id"]
+                        if updated > row["updated_at"]:
+                            self._save_version(row)
+                            self.db.execute(
+                                """UPDATE memories SET title=?, content=?, kind=?, tags=?, normalized_hash=?,
+                                   revision_count=revision_count+1, updated_at=?, embedding=NULL,
+                                   embedding_model=NULL WHERE id=?""",
+                                (title, content, kind, _clean_tags(rec.get("tags")) or row["tags"], h, updated,
+                                 row["id"]),
+                            )
+                            report["updated"] += 1
+                        else:
+                            report["older"] += 1
+                        continue
+
+                history = []
+                for v in rec.get("history") or []:
+                    try:
+                        vt, vc = self._check_text(str(v.get("title") or ""), str(v.get("content") or ""))
+                        history.append((int(v["version"]), vt, vc, _iso(v.get("created_at"), created)))
+                    except (StoreError, KeyError, TypeError, ValueError):
+                        report["history_dropped"] += 1
+                revisions = max([_int(rec.get("revision_count"), 1)] + [ver + 1 for ver, *_ in history])
+                cur = self.db.execute(
+                    """INSERT INTO memories(topic_key, kind, title, content, tags, project, normalized_hash,
+                           duplicate_count, revision_count, use_count, pinned, created_at, updated_at,
+                           last_used_at, deleted_at, delete_reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        tk, kind, title, content, _clean_tags(rec.get("tags")), rec.get("project") or None, h,
+                        _int(rec.get("duplicate_count"), 1), revisions, _int(rec.get("use_count"), 0),
+                        int(bool(rec.get("pinned"))), created, updated, _iso(rec.get("last_used_at"), None),
+                        deleted, (str(rec["delete_reason"]) if deleted and rec.get("delete_reason") else None),
+                    ),
+                )
+                new_id = cur.lastrowid
+                idmap[rec.get("id")] = new_id
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO memory_versions(memory_id, version, title, content, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    [(new_id, *v) for v in history],
+                )
+                if rec.get("superseded_by") is not None:
+                    links.append((new_id, rec["superseded_by"]))
+                report["created"] += 1
+
+            for new_id, old_target in links:
+                target = idmap.get(old_target)
+                if target and target != new_id:
+                    self.db.execute("UPDATE memories SET superseded_by = ? WHERE id = ?", (target, new_id))
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        self.db.execute("ROLLBACK" if dry_run else "COMMIT")
+        if not dry_run:
+            self._writes += 1
+        return report
 
     # ── read operations ────────────────────────────────────────────────────
     def recall(
@@ -641,11 +822,67 @@ class Store:
         ).fetchall()
         return [self._summary(r, preview=300) for r in rows]
 
-    def review(self, stale_days: int = 180, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
-        """Memories worth a human or AI look: stale, superseded, or saved repeatedly."""
+    def near_duplicates(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Pairs of active memories that look like duplicates or conflicting versions of one fact.
+
+        With embeddings, every pair is compared (in blocks, so memory stays small). Without,
+        each memory's keyword neighbours are compared by word overlap.
+        """
+        active = {r["id"]: r for r in self.db.execute(f"SELECT * FROM memories WHERE {_ACTIVE}")}
+        pairs: dict[tuple[int, int], float] = {}
+        if self.embedder:
+            import numpy as np
+
+            ids, mat = self._vectors()
+            keep = np.array([int(i) in active for i in ids], dtype=bool)
+            ids, mat = ids[keep], mat[keep]
+            cols = np.arange(len(ids))
+            for start in range(0, len(ids), 512):
+                sims = mat[start : start + 512] @ mat.T
+                rows = np.arange(start, start + len(sims))
+                sims[cols[None, :] <= rows[:, None]] = -1.0  # each pair once, never with itself
+                flat = sims.ravel()
+                k = min(limit, int((flat >= REVIEW_COSINE).sum()))
+                if not k:
+                    continue
+                for f in np.argpartition(-flat, k - 1)[:k]:
+                    bi, j = divmod(int(f), len(ids))
+                    pairs[(int(ids[start + bi]), int(ids[j]))] = float(flat[f])
+            dup_at = SEM_DUPLICATE
+        else:
+            recent = sorted(active.values(), key=lambda r: r["updated_at"], reverse=True)[:5000]
+            for r in recent:
+                text = self._vec_text(r["title"], r["content"])
+                for hit in self.similar(text, limit=3, exclude_id=r["id"]):
+                    if hit["similarity"] >= REVIEW_JACCARD:
+                        pairs[tuple(sorted((r["id"], hit["id"])))] = hit["similarity"]
+            dup_at = DUPLICATE_THRESHOLD
+        out = []
+        for (a, b), sim in sorted(pairs.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+            older, newer = sorted((active[a], active[b]), key=lambda r: (r["updated_at"], r["id"]))
+            dup = sim >= dup_at
+            out.append(
+                {
+                    "similarity": round(sim, 2),
+                    "label": "duplicate" if dup else "possible_conflict",
+                    "older": self._summary(older, preview=160),
+                    "newer": self._summary(newer, preview=160),
+                    "suggestion": (
+                        f"Same fact: merge anything useful into {newer['id']}, then supersede({older['id']}, {newer['id']})."
+                        if dup
+                        else f"Check whether {newer['id']} replaces {older['id']}; if so supersede({older['id']}, {newer['id']})."
+                    ),
+                }
+            )
+        return out
+
+    def review(self, stale_days: int = 180, limit: int = 20) -> dict[str, Any]:
+        """Memories worth a human or AI look: near-duplicates and conflicts, stale, superseded,
+        or saved repeatedly."""
         cutoff = (datetime.now(UTC) - timedelta(days=stale_days)).isoformat(timespec="seconds")
-        q = lambda sql, *a: [self._summary(r) for r in self.db.execute(sql, (*a, limit)).fetchall()]  # noqa: E731
+        q = lambda sql, *a: [self._summary(r, 160) for r in self.db.execute(sql, (*a, limit)).fetchall()]  # noqa: E731
         return {
+            "near_duplicates": self.near_duplicates(limit),
             "stale": q(
                 f"""SELECT * FROM memories WHERE {_ACTIVE} AND pinned = 0
                     AND COALESCE(last_used_at, created_at) < ? ORDER BY COALESCE(last_used_at, created_at) LIMIT ?""",
@@ -658,6 +895,9 @@ class Store:
             "repeated": q(
                 f"SELECT * FROM memories WHERE {_ACTIVE} AND duplicate_count > 2 "
                 "ORDER BY duplicate_count DESC LIMIT ?"
+            ),
+            "forgotten": q(
+                "SELECT * FROM memories WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?"
             ),
         }
 

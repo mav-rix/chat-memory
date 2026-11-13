@@ -39,7 +39,10 @@ DUPLICATES AND CONFLICTS: remember checks for similar memories. If it answers ne
 update the existing memory instead (or pass force=true if it is genuinely different). If it
 saved but lists similar memories that the new one replaces, call supersede(old_id, new_id).
 When the user says something is no longer true, update or supersede; use forget only when it
-should never have been saved or the user asks.
+should never have been saved or the user asks. restore undoes forget or supersede.
+
+TIDYING UP: when the user asks, call review and go through near_duplicates with them; act on
+each suggestion only after they agree.
 """
 
 mcp = MCPServer(name="chat-memory", version=__version__, instructions=INSTRUCTIONS)
@@ -129,6 +132,13 @@ def forget(memory_id: int, reason: str = "") -> dict[str, Any]:
 
 @mcp.tool()
 @_tool_errors
+def restore(memory_id: int) -> dict[str, Any]:
+    """Bring back a forgotten or superseded memory."""
+    return store().restore(memory_id)
+
+
+@mcp.tool()
+@_tool_errors
 def list_recent(limit: int = 10, project: str | None = None) -> list[dict[str, Any]]:
     """Most recently saved or updated memories."""
     return store().recent(limit, project)
@@ -144,15 +154,42 @@ def get_profile(project: str | None = None) -> dict[str, Any]:
 @mcp.tool()
 @_tool_errors
 def review(stale_days: int = 180) -> dict[str, Any]:
-    """Memories worth tidying: unused for stale_days, superseded, or saved repeatedly.
-    Use when the user asks to clean up memory."""
+    """Memories worth tidying, for when the user asks to clean up memory: near_duplicates
+    (pairs that look like the same fact or a changed fact, each with a suggestion), stale
+    (unused for stale_days), superseded, repeated (saved many times) and forgotten."""
     return store().review(stale_days)
+
+
+def _print_review(r: dict[str, Any]) -> None:
+    line = lambda m: f"  [{m['id']}] {m['title']}: {m['preview']}"  # noqa: E731
+    if r["near_duplicates"]:
+        print(f"Near-duplicates and possible conflicts ({len(r['near_duplicates'])}):")
+        for p in r["near_duplicates"]:
+            print(f"- {p['label']} ({p['similarity']})")
+            print(line(p["older"]))
+            print(line(p["newer"]))
+            print(f"  → {p['suggestion']}")
+    for key, heading in (
+        ("stale", "Not used for a long time"),
+        ("repeated", "Saved repeatedly"),
+        ("superseded", "Superseded (hidden from search)"),
+        ("forgotten", "Forgotten (removed for good by: chat-memory purge)"),
+    ):
+        if r[key]:
+            print(f"{heading} ({len(r[key])}):")
+            for m in r[key]:
+                print(line(m))
+    if not any(r.values()):
+        print("Nothing to tidy.")
 
 
 def main(argv: list[str] | None = None) -> None:
     import argparse
     import json
     import sys
+    from pathlib import Path
+
+    from . import transfer
 
     p = argparse.ArgumentParser(prog="chat-memory", description="Local MCP memory server.")
     sub = p.add_subparsers(dest="cmd")
@@ -160,7 +197,28 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
     sub.add_parser("reindex", help="embed any memories that are missing embeddings")
     sub.add_parser("stats", help="show memory counts and search mode")
+    ex = sub.add_parser("export", help="back up memories as JSON Lines")
+    ex.add_argument("file", nargs="?", default="-", help="output file (default: standard output)")
+    ex.add_argument("--include-forgotten", action="store_true", help="also export forgotten memories")
+    im = sub.add_parser("import", help="merge a chat-memory export or a Claude Code memory folder")
+    im.add_argument("path", type=Path, help="export file (.jsonl) or a folder of Claude Code memory files")
+    im.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    rv = sub.add_parser("review", help="list memories worth tidying")
+    rv.add_argument("--stale-days", type=int, default=180)
+    rv.add_argument("--json", action="store_true", help="print JSON instead of text")
+    pg = sub.add_parser("purge", help="permanently delete memories forgotten a while ago")
+    pg.add_argument("--days", type=int, default=30, help="forgotten more than this many days ago (default 30)")
+    pg.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     args = p.parse_args(argv)
+
+    try:
+        _run(args, json, sys, transfer)
+    except StoreError as e:
+        sys.exit(str(e))
+
+
+def _run(args, json, sys, transfer) -> None:
+    from pathlib import Path
 
     if args.cmd in (None, "serve"):
         mcp.run()
@@ -182,6 +240,38 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Embedded {store().backfill_embeddings()} memories.")
     elif args.cmd == "stats":
         print(json.dumps({"database": str(default_db_path()), **store().stats()}, indent=2))
+    elif args.cmd == "export":
+        if args.file == "-":
+            transfer.export_jsonl(store(), sys.stdout, args.include_forgotten)
+            return
+        path = Path(args.file).expanduser()
+        n = transfer.export_to_file(store(), path, args.include_forgotten)
+        print(f"Exported {n} memories to {path} (readable only by you).", file=sys.stderr)
+        if transfer.inside_git_repo(path):
+            print("Warning: that file is inside a git repository. It holds your memories; "
+                  "don't commit it.", file=sys.stderr)
+    elif args.cmd == "import":
+        if not args.path.exists():
+            sys.exit(f"No such file or folder: {args.path}")
+        report = store().import_records(transfer.read_any(args.path), dry_run=args.dry_run)
+        transfer.print_report(report, args.dry_run)
+        if not args.dry_run and report["created"] + report["updated"] and store().embedder:
+            print(f"Embedded {store().backfill_embeddings()} memories for search.")
+    elif args.cmd == "review":
+        r = store().review(args.stale_days)
+        print(json.dumps(r, indent=2)) if args.json else _print_review(r)
+    elif args.cmd == "purge":
+        s = store()
+        n = s.purgeable(args.days)
+        if not n:
+            print(f"Nothing forgotten more than {args.days} days ago.")
+            return
+        if not args.yes:
+            answer = input(f"Permanently delete {n} forgotten memories (and their history)? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Nothing deleted.")
+                return
+        print(f"Deleted {s.purge(args.days)} memories.")
 
 
 if __name__ == "__main__":

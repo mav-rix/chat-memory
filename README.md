@@ -77,14 +77,35 @@ Set `CHAT_MEMORY_DB` to store the database somewhere else (see `.env.example`).
 | `update_memory` | Edit a memory (previous text kept), or pin it |
 | `supersede` | Mark an old memory as replaced by a newer one |
 | `forget` | Soft-delete a memory |
+| `restore` | Bring back a forgotten or superseded memory |
 | `list_recent` | Latest saved or updated memories |
-| `review` | Stale, superseded and repeatedly saved memories, for tidying up |
+| `review` | Near-duplicates and possible conflicts (with suggestions), plus stale, superseded, repeated and forgotten memories |
 
 ## Your data stays private
 
-The database is never inside the repository. Backups are just a copy of the `.db` file; keep
-them out of the repo too. `.gitignore` blocks database files anyway, as a second line of
-defence.
+The database is never inside the repository. `.gitignore` blocks database files and
+`.jsonl` exports anyway, as a second line of defence.
+
+## Backups, moving machines, tidying up
+
+```bash
+chat-memory export ~/memory-backup.jsonl     # readable only by you; warns if inside a git repo
+chat-memory import ~/memory-backup.jsonl --dry-run
+chat-memory import ~/memory-backup.jsonl
+chat-memory import ~/.claude/projects/<project>/memory   # bring in Claude Code's memory files
+```
+
+Exports are JSON Lines: a header line, then one memory per line with its version history
+(embeddings are rebuilt on import). Import is all or nothing and safe to repeat: exact
+duplicates are skipped, a `topic_key` that already exists keeps whichever version is newer
+(the other goes into history), superseded links are kept, and every record passes the same
+secret filter as `remember`.
+
+`chat-memory review` lists pairs that look like the same fact (cosine ≥ 0.80) or a changed fact
+(≥ 0.60), each with a suggested `supersede`, plus stale, repeated, superseded and forgotten
+memories. In a chat, ask the AI to tidy up your memory; it calls `review` and asks before
+changing anything. `chat-memory purge` permanently deletes memories forgotten more than 30
+days ago (it asks first).
 
 ## How duplicates are judged
 
@@ -110,6 +131,10 @@ chat-memory                  # run the MCP server (stdio)
 chat-memory download-model   # fetch the embedding model
 chat-memory reindex          # embed memories that lack embeddings
 chat-memory stats            # counts and search mode
+chat-memory review           # what needs tidying
+chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
+chat-memory import PATH      # merge an export or a Claude Code memory folder (--dry-run)
+chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
 ```
 
 ## Development
@@ -126,7 +151,7 @@ The pre-commit hook needs [gitleaks](https://github.com/gitleaks/gitleaks) on yo
 
 1. ~~Keyword search, topic keys, duplicate and secret guards~~ (0.1)
 2. ~~Optional meaning-based search, mixed with keyword scores~~ (0.2)
-3. Export and import, and tidier review tooling
+3. ~~Export and import, near-duplicate and conflict review, restore~~ (0.3)
 
 ## Credits
 
