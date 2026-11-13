@@ -166,6 +166,11 @@ def test_work_mode_instructions():
     assert "account numbers" in personal and "WORK MODE" not in personal
 
 
+def test_cli_instructions(capsys):
+    main(["instructions", "--mode", "work"])
+    assert "WORK MODE" in capsys.readouterr().out
+
+
 def test_cli_match(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CHAT_MEMORY_DB", str(tmp_path / "a.db"))
     monkeypatch.setenv("CHAT_MEMORY_SEMANTIC", "0")

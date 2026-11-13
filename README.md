@@ -62,6 +62,41 @@ memories are embedded automatically the first time they're needed, or run
 claude mcp add --scope user chat-memory -- "$PWD/.venv/bin/chat-memory"
 ```
 
+### GitHub Copilot (VS Code, Copilot CLI)
+
+chat-memory works with any model Copilot offers (OpenAI, Anthropic, Google...): MCP is
+model-neutral. Add it to Copilot's MCP config, `~/.copilot/mcp-config.json`
+(Windows: `%USERPROFILE%\.copilot\mcp-config.json`), which VS Code's Copilot agent and the
+Copilot CLI both read:
+
+```json
+{
+  "mcpServers": {
+    "chat-memory": {
+      "type": "stdio",
+      "command": "C:\\Users\\you\\chat-memory\\.venv\\Scripts\\chat-memory.exe",
+      "args": [],
+      "env": { "CHAT_MEMORY_MODE": "work" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+(Older VS Code setups use **MCP: Open User Configuration**, with the same entry under a
+`"servers"` key instead of `"mcpServers"`.) Then, in Copilot Chat, check the tools list shows
+chat-memory.
+
+- **Business/Enterprise seats:** an organisation policy, *MCP servers in Copilot*, controls
+  whether MCP servers can be used at all, and is off by default on some plans. Ask your admin.
+- **Instructions:** VS Code passes the server's instructions to the model. If a model still
+  doesn't save or recall when it should, run `chat-memory instructions --mode work` and paste
+  the output into your Copilot custom instructions.
+- **Models differ:** how readily a model calls `remember` or `match` varies between models;
+  asking directly ("check these against my cases", "log this case") always works.
+- **Data flow:** recalled memories become part of the conversation, which Copilot sends to
+  the model you've selected, under your organisation's Copilot agreement.
+
 ### Claude Desktop and other MCP clients
 
 Add to the client's MCP config (adjust the path):
@@ -271,6 +306,7 @@ chat-memory match FILE       # exact hits for identifiers in a text/CSV file (--
 chat-memory export [FILE]    # back up as JSON Lines (stdout if no file)
 chat-memory import PATH      # merge an export, a Claude Code memory folder or a SQLite db (--dry-run)
 chat-memory inspect DB       # another tool's tables/columns and the suggested mapping (no content)
+chat-memory instructions     # the AI instructions, for clients' custom-instructions settings
 chat-memory purge            # permanently delete long-forgotten memories (--days, --yes)
 ```
 

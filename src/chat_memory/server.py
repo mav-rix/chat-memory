@@ -282,6 +282,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="SQLite: column for a field (content, title, kind, tags, topic_key, project, "
                          "created_at, updated_at, deleted_at); repeatable")
     im.add_argument("--kind", help="kind for every imported memory (e.g. case)")
+    it = sub.add_parser("instructions", help="print the AI instructions, to paste into a client's custom "
+                        "instructions if it ignores MCP server instructions")
+    it.add_argument("--mode", choices=["personal", "work"], help="default: CHAT_MEMORY_MODE")
     ins = sub.add_parser("inspect", help="show another SQLite memory db's tables and suggested mapping (no content)")
     ins.add_argument("path", type=Path)
     mt = sub.add_parser("match", help="check identifiers in a file (or - for stdin) for exact hits")
@@ -383,6 +386,8 @@ def _run(args, json, sys, transfer) -> None:
         transfer.print_report(report, args.dry_run)
         if not args.dry_run and report["created"] + report["updated"] and store().embedder:
             print(f"Embedded {store().backfill_embeddings()} memories for search.")
+    elif args.cmd == "instructions":
+        print(instructions(args.mode))
     elif args.cmd == "inspect":
         if not transfer.is_sqlite(args.path):
             sys.exit(f"{args.path} is not an SQLite database.")
