@@ -45,6 +45,12 @@ python3 -m venv .venv
 .venv/bin/chat-memory download-model   # ~90 MB, pinned revision, SHA-256 checked
 ```
 
+**Privacy:** the model runs entirely on your CPU. The only network access is
+`download-model` fetching two files (an HTTPS download from huggingface.co; nothing is sent
+except the request itself). Your memories and searches never leave the machine, and ONNX
+Runtime's optional telemetry is switched off. On a locked-down network, download the two
+files another way and set `CHAT_MEMORY_MODEL_DIR` (see below).
+
 The model is stored in `~/.cache/chat-memory/models/` (Windows: `%LOCALAPPDATA%\chat-memory\models`) and loads on the first search, so a
 session that never searches stays at about 75 MB of RAM (about 275 MB once loaded). Existing
 memories are embedded automatically the first time they're needed, or run

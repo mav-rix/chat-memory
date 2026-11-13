@@ -5,6 +5,8 @@ Install the extra (``pip install 'chat-memory[semantic]'``), then fetch the mode
 a 90 MB download in the middle of a tool call would time out and surprise people.
 
 Files come from a pinned Hugging Face revision and are checked against SHA-256 hashes.
+Downloading is the only network access: the model runs entirely on the local CPU, nothing is
+ever uploaded, and ONNX Runtime's optional telemetry is switched off.
 """
 
 from __future__ import annotations
@@ -89,6 +91,10 @@ class Embedder:
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
+        # Official Windows builds of ONNX Runtime can emit usage telemetry (no input data, per
+        # its docs). Turn it off anyway: memories may hold sensitive case data.
+        if hasattr(ort, "disable_telemetry_events"):
+            ort.disable_telemetry_events()
         d = Path(directory or model_dir())
         self._np = np
         self._tok = Tokenizer.from_file(str(d / "tokenizer.json"))
