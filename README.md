@@ -146,10 +146,24 @@ claude mcp list                                   # should show keepsake: Connec
 
 - **pip:** use your company's package mirror or proxy (`pip install --proxy ...` or
   `pip config set global.index-url ...`).
-- **Model download:** set `HTTPS_PROXY` if needed. Python uses the Windows certificate store,
-  so company TLS inspection usually works. If huggingface.co is blocked, everything still
-  works with keyword search; or download `onnx/model.onnx` and `tokenizer.json` from the pinned
-  revision another way, put them in one folder and point `KEEPSAKE_MODEL_DIR` at it.
+- **Model download blocked?** Many company filters block huggingface.co. You don't need it:
+  keyword search and `match` work without the model. To get semantic search, use an approved
+  internal copy; every file is still checked against its pinned SHA-256, whatever the source:
+
+  ```powershell
+  # an Artifactory/Nexus "Hugging Face" repository (any HF-compatible endpoint; HF_ENDPOINT works too)
+  keepsake download-model --mirror https://artifacts.example.com/artifactory/api/huggingfaceml/hf-remote
+  # a plain file store: {name} becomes model.onnx / tokenizer.json ({path}: onnx/model.onnx)
+  keepsake download-model --mirror "https://artifacts.example.com/generic/minilm/{name}"
+  # files IT has given you
+  keepsake download-model --from C:\path\to\folder
+  ```
+
+  If the mirror needs a token, set `KEEPSAKE_MODEL_MIRROR_TOKEN` (sent as a Bearer token; not
+  passed on the command line so it stays out of shell history). `KEEPSAKE_MODEL_MIRROR` sets a
+  default mirror. Files to request: `onnx/model.onnx` and `tokenizer.json` from
+  `sentence-transformers/all-MiniLM-L6-v2` at revision `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`
+  (Apache-2.0); their SHA-256 values are in `src/keepsake/embed.py`.
 - **Managed Claude Code:** your IT team may only allow approved MCP servers. If
   `claude mcp list` doesn't show it, that's likely why. Check that keeping work chat memories
   in a local file is allowed.
@@ -302,7 +316,7 @@ pinned memories. On a 2021 laptop CPU, 10,000 memories search in about 45 ms.
 
 ```bash
 keepsake                  # run the MCP server (stdio)
-keepsake download-model   # fetch the embedding model
+keepsake download-model   # fetch the embedding model (--mirror URL / --from FOLDER)
 keepsake reindex          # embed memories that lack embeddings
 keepsake stats            # counts and search mode
 keepsake usage            # estimated tokens used by memory tool calls

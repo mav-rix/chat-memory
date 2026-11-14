@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -59,8 +61,61 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def download_model(out=sys.stderr) -> Path:
-    """Fetch the pinned model files, verifying each hash. Safe to re-run."""
+HF_BASE = "https://huggingface.co"
+
+
+def _file_url(base: str, remote: str) -> str:
+    """URL of one model file. ``base`` is a Hugging Face-style endpoint (huggingface.co, or an
+    Artifactory/Nexus Hugging Face repository), or a template containing {path} (e.g.
+    onnx/model.onnx) or {name} (e.g. model.onnx) for a plain file store."""
+    if "{path}" in base or "{name}" in base:
+        return base.replace("{path}", remote).replace("{name}", remote.rsplit("/", 1)[-1])
+    return f"{base.rstrip('/')}/{MODEL_REPO}/resolve/{MODEL_REVISION}/{remote}"
+
+
+def _fetch(url: str, dest_fd: int) -> None:
+    from . import __version__
+
+    headers = {"User-Agent": f"keepsake/{__version__}"}
+    from .store import setting
+
+    if token := setting("MODEL_MIRROR_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with os.fdopen(dest_fd, "wb") as f, urllib.request.urlopen(req, timeout=60) as r:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+    except urllib.error.HTTPError as e:
+        hint = ""
+        if e.code in (401, 403, 407):
+            hint = (
+                " This often means a company network filter or a login is needed. Use an approved "
+                "internal copy instead: --mirror URL (with KEEPSAKE_MODEL_MIRROR_TOKEN if it needs a "
+                "token) or --from FOLDER. Keyword search and match work without the model."
+            )
+        raise RuntimeError(f"HTTP {e.code} from {url.split('?')[0]}.{hint}") from None
+
+
+def _find_local(folder: Path, remote: str, local: str) -> Path | None:
+    for candidate in (folder / remote, folder / local):
+        if candidate.is_file():
+            return candidate
+    matches = sorted(folder.rglob(local))
+    return matches[0] if matches else None
+
+
+def download_model(out=None, mirror: str | None = None, source_dir: Path | None = None) -> Path:
+    """Install the pinned model files, verifying each SHA-256. Safe to re-run.
+
+    Sources, in order: ``source_dir`` (files someone gave you), ``mirror`` / KEEPSAKE_MODEL_MIRROR
+    / HF_ENDPOINT (an internal copy), else huggingface.co. Whatever the source, a file is only
+    installed if its hash matches the pinned one.
+    """
+    from .store import setting
+
+    out = out or sys.stderr
+    base = mirror or setting("MODEL_MIRROR") or os.environ.get("HF_ENDPOINT") or HF_BASE
     target = model_dir()
     target.mkdir(parents=True, exist_ok=True)
     for remote, (local, expected) in MODEL_FILES.items():
@@ -68,16 +123,26 @@ def download_model(out=sys.stderr) -> Path:
         if dest.exists() and _sha256(dest) == expected:
             print(f"ok      {local}", file=out)
             continue
-        url = f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}/{remote}"
-        print(f"fetch   {local} …", file=out)
         fd, tmp = tempfile.mkstemp(dir=target, prefix=".part-")
         try:
-            with os.fdopen(fd, "wb") as f, urllib.request.urlopen(url, timeout=60) as r:
-                while chunk := r.read(1 << 20):
-                    f.write(chunk)
+            if source_dir is not None:
+                found = _find_local(Path(source_dir), remote, local)
+                if found is None:
+                    os.close(fd)
+                    raise RuntimeError(f"{local} not found in {source_dir}.")
+                print(f"copy    {local} from {found}", file=out)
+                with os.fdopen(fd, "wb") as f, open(found, "rb") as src:
+                    shutil.copyfileobj(src, f, 1 << 20)
+            else:
+                url = _file_url(base, remote)
+                print(f"fetch   {local} from {url.split('?')[0]} …", file=out)
+                _fetch(url, fd)
             got = _sha256(Path(tmp))
             if got != expected:
-                raise RuntimeError(f"{local}: checksum mismatch (expected {expected}, got {got}); not installed.")
+                raise RuntimeError(
+                    f"{local}: checksum mismatch (expected {expected}, got {got}); not installed. "
+                    "The file isn't the pinned version (or was altered)."
+                )
             os.replace(tmp, dest)
         finally:
             if os.path.exists(tmp):

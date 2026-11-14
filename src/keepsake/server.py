@@ -265,7 +265,12 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="keepsake", description="Local MCP memory server.")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("serve", help="run the MCP server over stdio (the default)")
-    sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
+    dm = sub.add_parser("download-model", help="fetch the embedding model for semantic search (~90 MB)")
+    dm.add_argument("--mirror", metavar="URL",
+                    help="internal copy: a Hugging Face-style endpoint (Artifactory/Nexus) or a URL "
+                         "template with {name} or {path}; token via KEEPSAKE_MODEL_MIRROR_TOKEN")
+    dm.add_argument("--from", dest="source_dir", type=Path, metavar="FOLDER",
+                    help="install from a folder holding model.onnx and tokenizer.json")
     sub.add_parser("reindex", help="embed any memories that are missing embeddings")
     sub.add_parser("stats", help="show memory counts and search mode")
     us = sub.add_parser("usage", help="estimated tokens used by memory tool calls")
@@ -319,7 +324,7 @@ def _run(args, json, sys, transfer) -> None:
         from .embed import download_model
 
         try:
-            path = download_model()
+            path = download_model(mirror=args.mirror, source_dir=args.source_dir)
         except ImportError:
             sys.exit("Install the semantic extra first: pip install 'keepsake[semantic]'")
         except Exception as e:  # network or checksum problems

@@ -1,6 +1,6 @@
 [project]
 name = "keepsake"
-version = "0.6.1"
+version = "0.6.2"
 description = "A small, local MCP server that gives AI chats persistent memory (Claude Code, GitHub Copilot and other MCP clients)."
 readme = "README.md"
 license = "MIT"
