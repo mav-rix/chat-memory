@@ -137,6 +137,10 @@ claude mcp list                                   # should show keepsake: Connec
   account's folder permissions (the Linux/macOS "owner only" file mode doesn't apply).
 - **Claude Desktop:** in its JSON config, double the backslashes:
   `"command": "C:\\Users\\you\\keepsake\\.venv\\Scripts\\keepsake.exe"`.
+- **Updating or reinstalling:** close VS Code / Copilot CLI / Claude Code first. Windows
+  locks `keepsake.exe` while the server runs, so pip fails with `WinError 32` and can leave the
+  package half-installed (`No module named 'keepsake'`); if that happens, close them and run
+  the install again.
 - **Don't move the folder** after registering it; Claude Code runs the server from there.
   If you do, run `claude mcp remove keepsake --scope user` and add it again.
 - **Keep the database out of OneDrive/Dropbox.** Syncing a live SQLite file can corrupt it.
@@ -146,6 +150,14 @@ claude mcp list                                   # should show keepsake: Connec
 
 - **pip:** use your company's package mirror or proxy (`pip install --proxy ...` or
   `pip config set global.index-url ...`).
+- **Certificate errors (`CERTIFICATE_VERIFY_FAILED`)** behind HTTPS inspection (Netskope,
+  Zscaler...): the `semantic` extra installs `truststore`, so Python checks certificates with
+  the operating system's own trust store, as browsers, curl and pip do. If you installed
+  without it, run `pip install truststore`. Python 3.13+ also rejects some inspection
+  certificates under its stricter X.509 rules ("Basic Constraints of CA cert not marked
+  critical"); truststore avoids that, or set `KEEPSAKE_TLS_RELAX_STRICT=1` to turn off only that
+  extra strictness. The certificate chain is still verified, and files are still checked
+  against their pinned SHA-256.
 - **Model download blocked?** Many company filters block huggingface.co. You don't need it:
   keyword search and `match` work without the model. To get semantic search, use an approved
   internal copy; every file is still checked against its pinned SHA-256, whatever the source:
@@ -321,6 +333,7 @@ keepsake reindex          # embed memories that lack embeddings
 keepsake stats            # counts and search mode
 keepsake usage            # estimated tokens used by memory tool calls
 keepsake review           # what needs tidying
+keepsake search WORDS     # ranked search by keywords and meaning, like the recall tool
 keepsake match FILE       # exact hits for identifiers in a text/CSV file (--text for names)
 keepsake export [FILE]    # back up as JSON Lines (stdout if no file)
 keepsake import PATH      # merge an export, a Claude Code memory folder or a SQLite db (--dry-run)

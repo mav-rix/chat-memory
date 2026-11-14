@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import functools
 import json
+import sys
+import threading
+import traceback
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -86,30 +89,60 @@ INSTRUCTIONS = instructions()
 mcp = MCPServer(name="keepsake", version=__version__, instructions=INSTRUCTIONS)
 
 
+_STORE_LOCK = threading.Lock()
+
+
 @functools.cache
-def store() -> Store:
+def _open_store() -> Store:
     return Store(default_db_path(), embedder=load_embedder())
+
+
+def store() -> Store:
+    """The shared store (created once, safely, whichever worker thread asks first)."""
+    with _STORE_LOCK:
+        return _open_store()
+
+
+store.cache_clear = _open_store.cache_clear  # type: ignore[attr-defined]
 
 
 def _log(tool: str, chars: int, ok: bool) -> None:
     try:
         store().log_call(tool, chars, ok)
-    except Exception:  # the usage log must never break a tool call
-        pass
+    except Exception:  # the usage log must never break a tool call, but say so
+        print(f"keepsake: usage log failed for {tool}:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
 
 
 def _tool_errors(fn):
-    """Turn StoreError into ToolError, and log each call's size (not its content)."""
+    """Run each tool call under the store lock (calls arrive on worker threads), turn
+    StoreError into a clear ToolError, report anything unexpected with its cause (and a
+    traceback on stderr, which MCP clients keep in the server log), and log each call's
+    size, never its content."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
-            result = fn(*args, **kwargs)
-        except StoreError as e:
-            _log(fn.__name__, len(str(e)), ok=False)
-            raise ToolError(str(e)) from e
-        _log(fn.__name__, len(json.dumps(result, ensure_ascii=False, default=str)), ok=True)
-        return result
+            s = store()
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            raise ToolError(f"keepsake could not open its database: {type(e).__name__}: {e}") from e
+        with s.lock:
+            try:
+                result = fn(*args, **kwargs)
+            except StoreError as e:
+                _log(fn.__name__, len(str(e)), ok=False)
+                raise ToolError(str(e)) from e
+            except Exception as e:
+                print(f"keepsake: {fn.__name__} failed:", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                _log(fn.__name__, 0, ok=False)
+                raise ToolError(
+                    f"Internal error in {fn.__name__}: {type(e).__name__}: {e}. "
+                    "The full traceback is in the MCP server log."
+                ) from e
+            _log(fn.__name__, len(json.dumps(result, ensure_ascii=False, default=str)), ok=True)
+            return result
 
     return wrapper
 
@@ -291,6 +324,10 @@ def main(argv: list[str] | None = None) -> None:
     it.add_argument("--mode", choices=["personal", "work"], help="default: KEEPSAKE_MODE")
     ins = sub.add_parser("inspect", help="show another SQLite memory db's tables and suggested mapping (no content)")
     ins.add_argument("path", type=Path)
+    sr = sub.add_parser("search", help="ranked search by keywords and meaning (like the recall tool)")
+    sr.add_argument("query", nargs="+")
+    sr.add_argument("--limit", type=int, default=8)
+    sr.add_argument("--json", action="store_true", help="print JSON instead of text")
     mt = sub.add_parser("match", help="check identifiers in a file (or - for stdin) for exact hits")
     mt.add_argument("file", help="text or CSV file; every cell is checked")
     mt.add_argument("--text", action="store_true",
@@ -338,6 +375,17 @@ def _run(args, json, sys, transfer) -> None:
         print(f"Embedded {store().backfill_embeddings()} memories.")
     elif args.cmd == "stats":
         print(json.dumps({"database": str(default_db_path()), "mode": mode(), **store().stats()}, indent=2))
+    elif args.cmd == "search":
+        hits = store().recall(" ".join(args.query), args.limit)
+        if args.json:
+            print(json.dumps(hits, indent=2))
+            return
+        for h in hits:
+            text = h.get("content") or h.get("preview", "")
+            text = text if len(text) <= 200 else text[:200].rstrip() + "…"
+            print(f"[{h['id']}] {h['title']}  (score {h['score']})\n    {text}")
+        if not hits:
+            print("No matches. For exact identifiers use: keepsake match FILE")
     elif args.cmd == "match":
         import re
 
@@ -407,6 +455,14 @@ def _run(args, json, sys, transfer) -> None:
             print("Check with: keepsake import PATH --dry-run (add --table/--map to override).")
             if "content" not in info["suggested_mapping"]:
                 print("No obvious text column: add --map content=COLUMN.")
+            elif info["content_guessed_from_length"]:
+                print(f"(The text column was guessed as the one with the longest values: "
+                      f"{info['suggested_mapping']['content']}. Check it with --dry-run.)")
+            bigger = [t for t in info["tables"] if t["rows"] > next(
+                x["rows"] for x in info["tables"] if x["table"] == info["suggested_table"])]
+            for t in bigger:
+                print(f"Note: {t['table']} has more rows ({t['rows']}) but no recognisable text column; "
+                      f"use --table {t['table']} --map content=COLUMN if that's where the memories are.")
         else:
             print("\nNo table with an obvious text column; pass --table and --map content=COLUMN.")
     elif args.cmd == "review":

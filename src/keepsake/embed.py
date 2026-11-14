@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import ssl
 import sys
 import tempfile
 import urllib.error
@@ -73,6 +74,27 @@ def _file_url(base: str, remote: str) -> str:
     return f"{base.rstrip('/')}/{MODEL_REPO}/resolve/{MODEL_REVISION}/{remote}"
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Verify HTTPS with the operating system's certificate checks when ``truststore`` is
+    installed (as pip does): company TLS inspection certificates in the Windows/macOS store
+    then work exactly as they do in browsers and curl. Otherwise Python's own checks apply;
+    KEEPSAKE_TLS_RELAX_STRICT=1 turns off only Python 3.13+'s extra strict X.509 rules, which
+    some inspection CAs fail ("Basic Constraints of CA cert not marked critical"). The chain is
+    still verified either way, and every file is checked against its pinned SHA-256."""
+    from .store import setting
+
+    try:
+        import truststore
+
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:
+        pass
+    ctx = ssl.create_default_context()
+    if setting("TLS_RELAX_STRICT").strip().lower() in ("1", "true", "yes", "on") and hasattr(ssl, "VERIFY_X509_STRICT"):
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return ctx
+
+
 def _fetch(url: str, dest_fd: int) -> None:
     from . import __version__
 
@@ -83,7 +105,7 @@ def _fetch(url: str, dest_fd: int) -> None:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with os.fdopen(dest_fd, "wb") as f, urllib.request.urlopen(req, timeout=60) as r:
+        with os.fdopen(dest_fd, "wb") as f, urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as r:
             while chunk := r.read(1 << 20):
                 f.write(chunk)
     except urllib.error.HTTPError as e:
@@ -95,6 +117,15 @@ def _fetch(url: str, dest_fd: int) -> None:
                 "token) or --from FOLDER. Keyword search and match work without the model."
             )
         raise RuntimeError(f"HTTP {e.code} from {url.split('?')[0]}.{hint}") from None
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLCertVerificationError):
+            raise RuntimeError(
+                f"Certificate check failed for {url.split('?')[0]} ({e.reason.verify_message}). On a "
+                "company network that inspects HTTPS, install truststore (pip install truststore) so "
+                "Windows checks the certificate as browsers do; if the error mentions Basic "
+                "Constraints, KEEPSAKE_TLS_RELAX_STRICT=1 also works."
+            ) from None
+        raise
 
 
 def _find_local(folder: Path, remote: str, local: str) -> Path | None:

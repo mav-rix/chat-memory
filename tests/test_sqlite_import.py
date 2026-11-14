@@ -107,8 +107,7 @@ def test_manual_mapping_and_kind(store, tmp_path):
         "CREATE TABLE kb (id INTEGER PRIMARY KEY, heading TEXT, note_text TEXT, logged TEXT);",
         [("INSERT INTO kb VALUES (1,'Case FR-2003','Card 4111 1111 1111 1111 exp 12/27 used from 192.0.2.30.','2026-02-01T08:00:00')", ())],
     )
-    with pytest.raises(StoreError, match="holds the memory text"):
-        list(transfer.read_sqlite(path))
+    assert transfer.inspect_sqlite(path)["suggested_mapping"]["content"] == "note_text"  # found by length
     recs = transfer.read_sqlite(path, table="kb", mapping={"content": "note_text", "title": "heading",
                                                            "created_at": "logged"}, kind="case")
     assert store.import_records(recs)["created"] == 1
@@ -187,3 +186,40 @@ def test_full_text_copy_does_not_beat_the_real_table(tmp_path):
          ("INSERT INTO notes_search VALUES ('Alpha note.')", ())],
     )
     assert transfer.inspect_sqlite(path)["suggested_table"] == "notes"
+
+
+def test_fact_column_fts_table_beats_small_messages_table(tmp_path, store):
+    """The layout from the work-laptop report: memories(fact, tags, ts) as FTS5 with 47 rows
+    next to a 2-row messages table that has a 'content' column."""
+    rows = [(f"INSERT INTO memories VALUES (?, 'fraud', '2026-0{1 + i % 9}-01')",
+             (f"Case FR-4{i:03d}: order ORD-2026-5{i:05d} from 192.0.2.{i}.",)) for i in range(47)]
+    path = make_db(
+        tmp_path / "work-like.db",
+        """CREATE VIRTUAL TABLE memories USING fts5(fact, tags, ts UNINDEXED);
+           CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT);""",
+        rows + [("INSERT INTO messages VALUES (1,'user','hi')", ()), ("INSERT INTO messages VALUES (2,'ai','hello')", ())],
+    )
+    info = transfer.inspect_sqlite(path)
+    assert info["suggested_table"] == "memories"
+    assert info["suggested_mapping"] == {"content": "fact", "tags": "tags", "created_at": "ts"}
+    report = store.import_records(transfer.read_sqlite(path, kind="case"))
+    assert report["created"] == 47
+    assert store.match(["192.0.2.5"])[0]["found"]
+
+
+def test_unnamed_text_column_found_by_length(tmp_path, store):
+    path = make_db(
+        tmp_path / "odd.db",
+        "CREATE TABLE stuff (id INTEGER PRIMARY KEY, k TEXT, v TEXT, n INTEGER);",
+        [(f"INSERT INTO stuff VALUES ({i}, 'key{i}', 'A long enough memory sentence number {i}.', {i})", ())
+         for i in range(5)],
+    )
+    info = transfer.inspect_sqlite(path)
+    assert info["suggested_mapping"]["content"] == "v" and info["content_guessed_from_length"]
+    assert "A long enough" not in repr(info)  # still no content shown
+
+
+def test_no_text_anywhere_asks_for_the_column(tmp_path):
+    path = make_db(tmp_path / "nums.db", "CREATE TABLE t (a INTEGER, b REAL);", [("INSERT INTO t VALUES (1, 2.0)", ())])
+    with pytest.raises(StoreError, match="holds the memory text"):
+        list(transfer.read_sqlite(path))

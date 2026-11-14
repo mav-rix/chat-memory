@@ -166,6 +166,20 @@ def test_work_mode_instructions():
     assert "account numbers" in personal and "WORK MODE" not in personal
 
 
+def test_cli_search(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
+
+    server.store.cache_clear()
+    server.store().remember("Case 11", "Refund abuse on ORD-2026-555011.")
+    main(["search", "refund", "abuse"])
+    assert "Case 11" in capsys.readouterr().out
+    main(["search", "zebra"])
+    assert "No matches" in capsys.readouterr().out
+    server.store.cache_clear()
+
+
 def test_cli_instructions(capsys):
     main(["instructions", "--mode", "work"])
     assert "WORK MODE" in capsys.readouterr().out

@@ -1,6 +1,6 @@
 [project]
 name = "keepsake"
-version = "0.6.2"
+version = "0.6.3"
 description = "A small, local MCP server that gives AI chats persistent memory (Claude Code, GitHub Copilot and other MCP clients)."
 readme = "README.md"
 license = "MIT"
@@ -8,7 +8,7 @@ requires-python = ">=3.11"
 dependencies = ["mcp>=2.3,<3"]
 
 [project.optional-dependencies]
-semantic = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]
+semantic = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26", "truststore>=0.9"]
 dev = ["pytest>=8", "numpy>=1.26"]
 
 [project.scripts]

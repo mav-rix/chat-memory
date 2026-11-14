@@ -19,6 +19,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -237,6 +238,9 @@ class Store:
     _vec_key: tuple | None = field(default=None, init=False, repr=False)
     _vec_ids: Any = field(default=None, init=False, repr=False)
     _vec_mat: Any = field(default=None, init=False, repr=False)
+    # One connection, shared by the MCP server's worker threads; callers that may run
+    # concurrently (the server) hold this lock around each operation.
+    lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -245,7 +249,7 @@ class Store:
             new_file = not self.path.exists()
         else:
             new_file = False
-        self.db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        self.db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")

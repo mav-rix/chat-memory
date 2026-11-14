@@ -137,3 +137,31 @@ def test_cli_from_folder(tmp_path, fake_model, capsys):
         (d / remote.rsplit("/", 1)[-1]).write_bytes(data)
     main(["download-model", "--from", str(d)])
     assert "Model ready" in capsys.readouterr().out and installed_ok(fake_model)
+
+
+def test_tls_uses_the_os_trust_store_when_available():
+    import truststore
+
+    assert isinstance(embed._ssl_context(), truststore.SSLContext)
+
+
+def test_tls_relax_strict_is_opt_in(monkeypatch):
+    import builtins
+    import ssl
+
+    real_import = builtins.__import__
+
+    def no_truststore(name, *a, **k):
+        if name == "truststore":
+            raise ImportError
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_truststore)
+    monkeypatch.delenv("KEEPSAKE_TLS_RELAX_STRICT", raising=False)
+    strict = embed._ssl_context()
+    assert strict.verify_mode == ssl.CERT_REQUIRED and strict.check_hostname
+    monkeypatch.setenv("KEEPSAKE_TLS_RELAX_STRICT", "1")
+    relaxed = embed._ssl_context()
+    assert relaxed.verify_mode == ssl.CERT_REQUIRED and relaxed.check_hostname  # still verified
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        assert not relaxed.verify_flags & ssl.VERIFY_X509_STRICT

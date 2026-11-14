@@ -115,14 +115,15 @@ def read_claude_code_dir(directory: Path) -> Iterator[dict[str, Any]]:
 # ── other SQLite memory databases ──────────────────────────────────────────
 # Column names that other memory tools commonly use, best guess first.
 FIELD_GUESSES: dict[str, tuple[str, ...]] = {
-    "content": ("content", "text", "body", "memory", "observation", "note", "notes", "document",
-                "message", "value", "description", "data"),
+    "content": ("content", "text", "body", "memory", "fact", "facts", "observation", "observations",
+                "note", "notes", "entry", "memory_text", "document", "message", "value", "description",
+                "data"),
     "title": ("title", "name", "summary", "subject", "label", "topic", "heading"),
     "kind": ("kind", "type", "memory_type", "category", "observation_type", "entity_type"),
     "tags": ("tags", "labels", "keywords"),
     "topic_key": ("topic_key",),
     "project": ("project", "scope", "namespace", "workspace"),
-    "created_at": ("created_at", "created_at_iso", "created", "timestamp", "inserted_at", "date", "time"),
+    "created_at": ("created_at", "created_at_iso", "created", "timestamp", "ts", "inserted_at", "date", "time"),
     "updated_at": ("updated_at", "updated_at_iso", "modified_at", "updated", "last_modified", "modified"),
     "deleted_at": ("deleted_at", "deleted", "is_deleted", "archived"),
 }
@@ -174,8 +175,26 @@ def _tables(db) -> list[dict[str, Any]]:
             continue  # internal tables behind a full-text index
         cols = [(r["name"], (r["type"] or "").upper()) for r in db.execute(f'PRAGMA table_info("{name}")')]
         rows = db.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-        out.append({"table": name, "rows": rows, "columns": cols, "storage": storage})
+        mapping = guess_mapping(cols)
+        if "content" not in mapping and rows:
+            if longest := _longest_text_column(db, name, [c for c, _ in cols if c not in mapping.values()]):
+                mapping["content"] = longest
+        out.append({"table": name, "rows": rows, "columns": cols, "storage": storage, "mapping": mapping})
     return out
+
+
+def _longest_text_column(db, table: str, columns: list[str]) -> str | None:
+    """The column whose text values are longest on average (at least 15 characters): the
+    likely memory text when no column name says so. Only lengths are read, never values."""
+    best, best_len = None, 15.0
+    for c in columns:
+        avg = db.execute(
+            f'SELECT AVG(LENGTH("{c}")) FROM (SELECT "{c}" FROM "{table}" '
+            f'WHERE typeof("{c}") = \'text\' LIMIT 500)'
+        ).fetchone()[0]
+        if avg is not None and avg > best_len:
+            best, best_len = c, avg
+    return best
 
 
 def guess_mapping(columns: list[tuple[str, str]]) -> dict[str, str]:
@@ -191,10 +210,12 @@ def guess_mapping(columns: list[tuple[str, str]]) -> dict[str, str]:
 
 
 def _pick_table(tables: list[dict[str, Any]]) -> dict[str, Any] | None:
-    usable = [t for t in tables if "content" in guess_mapping(t["columns"])]
+    """The table holding the memories: most rows among tables with a text column; a
+    full-text copy loses a tie to the plain table it mirrors."""
+    usable = [t for t in tables if "content" in t["mapping"]]
     if not usable and len(tables) == 1:
         return tables[0]  # the only table: ask which column holds the text
-    return max(usable, key=lambda t: (t["rows"], len(guess_mapping(t["columns"]))), default=None)
+    return max(usable, key=lambda t: (t["rows"], t["storage"] == "table", len(t["mapping"])), default=None)
 
 
 def inspect_sqlite(path: Path) -> dict[str, Any]:
@@ -208,7 +229,11 @@ def inspect_sqlite(path: Path) -> dict[str, Any]:
     return {
         "tables": tables,
         "suggested_table": best["table"] if best else None,
-        "suggested_mapping": guess_mapping(best["columns"]) if best else {},
+        "suggested_mapping": best["mapping"] if best else {},
+        "content_guessed_from_length": bool(
+            best and "content" in best["mapping"] and best["mapping"]["content"] not in
+            {c for c, _ in best["columns"] if c.lower() in FIELD_GUESSES["content"]}
+        ),
     }
 
 
@@ -249,7 +274,7 @@ def read_sqlite(
                 else f"Couldn't find a table of memories in {path}; run `keepsake inspect` and pass --table."
             )
         cols = {c for c, _ in chosen["columns"]}
-        m = {**guess_mapping(chosen["columns"]), **(mapping or {})}
+        m = {**chosen["mapping"], **(mapping or {})}
         if bad := [f"{k}={v}" for k, v in m.items() if v not in cols]:
             raise StoreError(f"Table {chosen['table']} has no column for: {', '.join(bad)}.")
         if "content" not in m:
