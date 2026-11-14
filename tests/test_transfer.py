@@ -249,3 +249,29 @@ def test_exports_from_before_the_rename_import(tmp_path, store):
     p = tmp_path / "old.jsonl"
     p.write_text('{"format": "chat-memory", "version": 1}\n{"title": "Bins", "content": "Bins go out on Tuesday."}\n')
     assert store.import_records(transfer.read_jsonl(p))["created"] == 1
+
+
+def test_synced_folder_detection(tmp_path, monkeypatch):
+    for v in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+        monkeypatch.delenv(v, raising=False)
+    plain = tmp_path / "Documents" / "backup.jsonl"
+    assert transfer.inside_synced_folder(plain) is None
+    assert transfer.inside_synced_folder(tmp_path / "OneDrive - Example Ltd" / "b.jsonl") == "OneDrive - Example Ltd"
+    assert transfer.inside_synced_folder(tmp_path / "Dropbox" / "x" / "b.jsonl") == "Dropbox"
+    monkeypatch.setenv("OneDriveCommercial", str(tmp_path / "Work Files"))
+    assert transfer.inside_synced_folder(tmp_path / "Work Files" / "b.jsonl") == "OneDrive"
+    assert transfer.inside_synced_folder(tmp_path / "Boxes" / "b.jsonl") is None  # no false alarm
+
+
+def test_cli_export_warns_about_synced_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("KEEPSAKE_DB", str(tmp_path / "a.db"))
+    monkeypatch.setenv("KEEPSAKE_SEMANTIC", "0")
+    from keepsake import server
+
+    server.store.cache_clear()
+    synced = tmp_path / "OneDrive - Example Ltd"
+    synced.mkdir()
+    main(["export", str(synced / "b.jsonl")])
+    err = capsys.readouterr().err
+    assert "plain, unencrypted text" in err and "uploaded to the cloud" in err
+    server.store.cache_clear()

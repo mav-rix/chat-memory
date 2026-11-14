@@ -26,6 +26,28 @@ _FORMATS = (FORMAT, "chat-memory")  # exports made before the rename still impor
 FORMAT_VERSION = 1
 
 
+_SYNC_NAMES = ("onedrive", "dropbox", "google drive", "googledrive", "my drive", "icloud drive",
+               "iclouddrive", "box", "box sync", "pcloud", "nextcloud", "mega")
+
+
+def inside_synced_folder(path: Path) -> str | None:
+    """The cloud-sync service whose folder holds ``path`` (OneDrive, Dropbox...), if any."""
+    p = path.resolve()
+    roots = [os.environ.get(v) for v in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer")]
+    for root in filter(None, roots):
+        try:
+            if p.is_relative_to(Path(root).resolve()):
+                return "OneDrive"
+        except (OSError, ValueError):
+            pass
+    for part in p.parent.parts:
+        low = part.lower()
+        for name in _SYNC_NAMES:
+            if low == name or low.startswith(name + " -") or low.startswith(name + "-"):
+                return part
+    return None
+
+
 def inside_git_repo(path: Path) -> bool:
     p = path.resolve().parent
     return any((d / ".git").exists() for d in (p, *p.parents))

@@ -423,10 +423,14 @@ def _run(args, json, sys, transfer) -> None:
             return
         path = Path(args.file).expanduser()
         n = transfer.export_to_file(store(), path, args.include_forgotten)
-        print(f"Exported {n} memories to {path} (readable only by you).", file=sys.stderr)
+        print(f"Exported {n} memories to {path}. It is plain, unencrypted text (permissions limit "
+              "it to you on Linux/macOS; on Windows your user profile's permissions apply).", file=sys.stderr)
         if transfer.inside_git_repo(path):
             print("Warning: that file is inside a git repository. It holds your memories; "
                   "don't commit it.", file=sys.stderr)
+        if service := transfer.inside_synced_folder(path):
+            print(f"Warning: that file is inside a {service} folder, so it will be uploaded to the "
+                  "cloud. Move it somewhere that isn't synced.", file=sys.stderr)
     elif args.cmd == "import":
         if not args.path.exists():
             sys.exit(f"No such file or folder: {args.path}")

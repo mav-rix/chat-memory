@@ -86,6 +86,12 @@ Copilot CLI both read:
 }
 ```
 
+On a managed laptop, launching through Python instead of the `keepsake.exe` launcher is the
+safer choice: some endpoint-security setups restrict small unsigned launchers, and Windows
+then doesn't lock `keepsake.exe` while you upgrade. Use
+`"command": "C:\\Users\\you\\keepsake\\.venv\\Scripts\\python.exe"` with
+`"args": ["-m", "keepsake"]`; everything else stays the same.
+
 (Older VS Code setups use **MCP: Open User Configuration**, with the same entry under a
 `"servers"` key instead of `"mcpServers"`.) Then, in Copilot Chat, check the tools list shows
 keepsake.
@@ -167,9 +173,16 @@ claude mcp list                                   # should show keepsake: Connec
   keepsake download-model --mirror https://artifacts.example.com/artifactory/api/huggingfaceml/hf-remote
   # a plain file store: {name} becomes model.onnx / tokenizer.json ({path}: onnx/model.onnx)
   keepsake download-model --mirror "https://artifacts.example.com/generic/minilm/{name}"
-  # files IT has given you
+  # files IT has given you: a local folder, a network share or a USB stick
   keepsake download-model --from C:\path\to\folder
+  keepsake download-model --from \\fileserver\software\minilm
   ```
+
+  Expected sizes, as a quick check of a copy: `model.onnx` 90,405,214 bytes and
+  `tokenizer.json` 466,247 bytes (the install prints both). Whether a USB stick is allowed
+  depends on your organisation's device-control policy, so prefer a network share or artifact
+  store where there is one. Never use unofficial third-party mirrors to get around a filter:
+  the pinned SHA-256 check is what makes any copy safe, and it can't be turned off.
 
   If the mirror needs a token, set `KEEPSAKE_MODEL_MIRROR_TOKEN` (sent as a Bearer token; not
   passed on the command line so it stays out of shell history). `KEEPSAKE_MODEL_MIRROR` sets a
@@ -268,6 +281,26 @@ keepsake import ~/.claude/projects/<project>/memory   # bring in Claude Code's m
 keepsake import other-tool.db --dry-run                # another tool's SQLite memory database
 ```
 
+### Switching from another memory server: tool names
+
+Instruction files (Copilot custom instructions, `AGENTS.md`, `CLAUDE.md`...) that name the
+old server's tools need updating; `keepsake instructions --mode work` prints a ready-made
+block. Typical equivalents:
+
+| Old tool names (varies by server) | keepsake |
+|---|---|
+| `memory_search`, `search_memories`, `retrieve_memory`, `search_nodes` | `recall` |
+| `memory_add`, `store_memory`, `add_memory`, `add_observations` | `remember` |
+| `memory_get`, `get_memory`, `open_nodes` | `get_memory` |
+| `memory_update`, `update_memory` | `update_memory` |
+| `memory_delete`, `delete_memory`, `delete_observations` | `forget` (soft) |
+| `memory_list`, `list_memories`, `read_graph` | `list_recent` |
+| exact lookups (any) | `match` |
+
+After switching, remove the old server's entry from the MCP config, and delete any backups of
+that config (`mcp-config.json.bak-*` and the like) so the retired server isn't revived by
+restoring one.
+
 ### Moving from another SQLite-based memory tool
 
 Many memory tools keep their data in SQLite, each with its own tables. `inspect` shows the
@@ -294,6 +327,10 @@ old database is opened read-only and never changed; close
 the old tool first (or import a copy). Records go through the same checks as any save, so
 card expiry dates, PINs and security codes are removed and credentials are refused. Importing
 again adds nothing new.
+
+**Exports are plain, unencrypted text** containing everything you've saved: keep them out of
+OneDrive, Dropbox and git (keepsake warns if the target is in a synced folder or a git
+repository), and delete old ones you no longer need.
 
 Exports are JSON Lines: a header line, then one memory per line with its version history
 (embeddings are rebuilt on import). Import is all or nothing and safe to repeat: exact

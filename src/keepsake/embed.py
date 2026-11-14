@@ -34,6 +34,20 @@ MODEL_FILES = {
 }
 
 
+# Expected sizes, for a quick sanity check of a copied file (the SHA-256 is what counts).
+MODEL_SIZES = {"model.onnx": 90_405_214, "tokenizer.json": 466_247}
+
+
+def _size_note(local: str, path: Path | None = None) -> str:
+    expected = MODEL_SIZES.get(local)
+    if expected is None:
+        return ""
+    if path is None:
+        return f" ({expected:,} bytes)"
+    got = path.stat().st_size
+    return f" (expected {expected:,} bytes, got {got:,})" if got != expected else f" ({got:,} bytes)"
+
+
 def model_dir() -> Path:
     from .store import setting
 
@@ -152,7 +166,7 @@ def download_model(out=None, mirror: str | None = None, source_dir: Path | None 
     for remote, (local, expected) in MODEL_FILES.items():
         dest = target / local
         if dest.exists() and _sha256(dest) == expected:
-            print(f"ok      {local}", file=out)
+            print(f"ok      {local}{_size_note(local)}", file=out)
             continue
         fd, tmp = tempfile.mkstemp(dir=target, prefix=".part-")
         try:
@@ -171,14 +185,15 @@ def download_model(out=None, mirror: str | None = None, source_dir: Path | None 
             got = _sha256(Path(tmp))
             if got != expected:
                 raise RuntimeError(
-                    f"{local}: checksum mismatch (expected {expected}, got {got}); not installed. "
-                    "The file isn't the pinned version (or was altered)."
+                    f"{local}: checksum mismatch{_size_note(local, Path(tmp))}; not installed. "
+                    f"Expected SHA-256 {expected}, got {got}. The file isn't the pinned version "
+                    "(an incomplete copy, a different export, or altered)."
                 )
             os.replace(tmp, dest)
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
-        print(f"ok      {local}", file=out)
+        print(f"ok      {local}{_size_note(local, dest)}", file=out)
     return target
 
 

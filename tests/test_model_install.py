@@ -165,3 +165,10 @@ def test_tls_relax_strict_is_opt_in(monkeypatch):
     assert relaxed.verify_mode == ssl.CERT_REQUIRED and relaxed.check_hostname  # still verified
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         assert not relaxed.verify_flags & ssl.VERIFY_X509_STRICT
+
+
+def test_size_shown_for_real_files_and_mismatch(tmp_path):
+    p = tmp_path / "model.onnx"
+    p.write_bytes(b"x" * 10)
+    assert "expected 90,405,214 bytes, got 10" in embed._size_note("model.onnx", p)
+    assert embed._size_note("unknown.bin", p) == ""
